@@ -28,12 +28,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-        # 请确保您的 requirements.txt 包含了 PyInstaller 和所有项目依赖
+          # 为确保 PyInstaller 总是被安装，可以额外加一行：
+          # pip install PyInstaller
 
-      - name: Build Windows Executable with PyInstaller
+      - name: Build Windows Executable with PyInstaller (Console Mode)
         run: |
-          # 修正：使用 'python -m PyInstaller' 来确保 PyInstaller 被正确调用
-          python -m PyInstaller --noconsole `
+          # 修正：使用 '--console' 参数来在前台运行并显示日志
+          python -m PyInstaller --console ` # <--- 这里从 --noconsole 改为 --console
                                 --onefile `
                                 --name "ProbeWebTool" `
                                 --add-data "static;static" `
@@ -45,7 +46,7 @@ jobs:
       - name: Upload Windows Executable Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ProbeWebTool-Windows-Executable
+          name: ProbeWebTool-Windows-Executable-Console
           path: dist/ProbeWebTool.exe
           # retention-days: 7 
 
