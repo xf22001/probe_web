@@ -27,35 +27,28 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 假设您已创建了 requirements.txt 文件
           pip install -r requirements.txt
-          # 如果没有 requirements.txt，可以替换为:
-          # pip install PyInstaller websockets==10.4 pyftpdlib
         # 请确保您的 requirements.txt 包含了 PyInstaller 和所有项目依赖
 
       - name: Build Windows Executable with PyInstaller
         run: |
-          pyinstaller --noconsole `
-                      --onefile `
-                      --name "ProbeWebTool" `
-                      --add-data "static;static" `
-                      --hidden-import "pyftpdlib.ioloop" `
-                      --hidden-import "pyftpdlib.log" `
-                      app.py
+          # 修正：使用 'python -m PyInstaller' 来确保 PyInstaller 被正确调用
+          python -m PyInstaller --noconsole `
+                                --onefile `
+                                --name "ProbeWebTool" `
+                                --add-data "static;static" `
+                                --hidden-import "pyftpdlib.ioloop" `
+                                --hidden-import "pyftpdlib.log" `
+                                app.py
         # 注意：在 Windows shell (PowerShell/CMD) 中，` 是行继续符，而不是 \。
-        # --add-data "源路径;目标路径" - 源路径是相对于 PyInstaller 运行目录，目标路径是打包后解压的相对路径。
-        # 这里的 "static;static" 表示将项目根目录下的 'static' 文件夹及其内容，
-        # 打包到可执行文件内部的 'static' 路径。
 
       - name: Upload Windows Executable Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ProbeWebTool-Windows-Executable
           path: dist/ProbeWebTool.exe
-          # 保留天数，可选，最长90天
           # retention-days: 7 
 
       - name: List dist directory content (for debugging)
         run: |
-          ls -R dist/
-          # 或者在 PowerShell 中使用 Get-ChildItem -Recurse dist/
+          Get-ChildItem -Recurse dist/
