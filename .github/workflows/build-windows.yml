@@ -34,7 +34,7 @@ jobs:
       - name: Build Windows Executable with PyInstaller (Console Mode)
         run: |
           # 修正：使用 '--console' 参数来在前台运行并显示日志
-          python -m PyInstaller --console ` # <--- 这里从 --noconsole 改为 --console
+          python -m PyInstaller --console `
                                 --onefile `
                                 --name "ProbeWebTool" `
                                 --add-data "static;static" `
