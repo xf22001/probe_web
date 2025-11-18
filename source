@@ -1,0 +1,1835 @@
+./app.py
+# app.py
+import os
+import json
+import threading
+import asyncio
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse
+from typing import Dict, Any, Optional
+import websockets
+import traceback
+import logging
+
+# 导入自定义模块
+from scanner import UdpDiscoveryServer, BROADCAST_PORT
+from connector import Connector, PROBE_TOOL_PORT
+# 修正：显式导入 base64_to_bytes
+from protocol import encode_request, text_to_request_bytes, base64_to_bytes, decode_request 
+from logger_server import UdpLogServer, LOG_TOOL_PORT
+from ftp_server import ProbeFtpServer # 导入 FTP 服务器类
+
+# HTTP 和 WebSocket 端口保持不变
+HTTP_PORT = 8000
+WS_PORT = 8001
+
+logger = logging.getLogger(__name__)
+
+class ServerState:
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        self.loop = loop
+        self.devices_lock = threading.Lock()
+        self.devices: Dict[str, Dict[str, Any]] = {}  # ip -> {id:, status:}
+        
+        self.connector = Connector(loop=self.loop, on_command_response=self.handle_command_response) 
+        
+        self.log_server: Optional[UdpLogServer] = None
+        self.discovery_server: Optional[UdpDiscoveryServer] = None 
+        self.ftp_server: Optional[ProbeFtpServer] = None # FTP server will be initialized and started externally
+        
+        self.log_ws = set()
+        self.dev_ws = set()
+
+    def update_devices(self, found_ip: str, device_id: str):
+        logger.debug(f"update_devices called. IP: {found_ip}, Raw ID: '{device_id}'")
+        with self.devices_lock:
+            display_device_id = device_id if device_id else f"Unnamed_Device_{found_ip.replace('.', '_')}"
+            
+            existing = self.devices.get(found_ip)
+            if not existing:
+                self.devices[found_ip] = {"id": display_device_id, "status": "Available"}
+                logger.info(f"Added new device: {found_ip} -> {self.devices[found_ip]}")
+            else:
+                if existing["id"].startswith("Unnamed_Device_") and device_id and existing["id"] != display_device_id:
+                     self.devices[found_ip]["id"] = display_device_id
+                     logger.info(f"Updated generic device ID for {found_ip} to: '{display_device_id}'")
+                elif existing["id"] != display_device_id and device_id:
+                    self.devices[found_pullid]["id"] = display_device_id
+                    logger.info(f"Updated device ID for {found_ip} to: '{display_device_id}'")
+
+        logger.debug(f"Devices dict after update_devices: {self.devices}")
+        asyncio.run_coroutine_threadsafe(self.push_devices_snapshot(), self.loop)
+
+    def set_device_status(self, ip: str, status: str):
+        logger.debug(f"set_device_status called for IP: {ip}, Status: {status}")
+        with self.devices_lock:
+            if ip in self.devices:
+                self.devices[ip]["status"] = status
+                logger.info(f"Updated status for {ip}: {self.devices[ip]}")
+            else:
+                self.devices[ip] = {"id": f"Unnamed_Device_{ip.replace('.', '_')}", "status": status} 
+                logger.info(f"Added device with status '{status}', as it was not in list: {ip} -> {self.devices[ip]}")
+        asyncio.run_coroutine_threadsafe(self.push_devices_snapshot(), self.loop)
+
+    async def push_devices_snapshot(self):
+        with self.devices_lock:
+            snap = [{"ip": ip, "id": info["id"], "status": info["status"]} for ip, info in self.devices.items()]
+        
+        logger.debug(f"push_devices_snapshot preparing to send: {snap}")
+        msg = json.dumps({"type": "devices", "data": snap})
+        dead = []
+        for ws in list(self.dev_ws):
+            try:
+                await ws.send(msg)
+                logger.debug(f"Sent device snapshot to WS client {ws.remote_address}")
+            except Exception as e:
+                logger.error(f"Error sending device snapshot to WS client {ws.remote_address}: {e}. Marking as dead.")
+                dead.append(ws)
+        for d in dead:
+            self.dev_ws.discard(d)
+
+    async def broadcast_log(self, line: str):
+        msg = json.dumps({"type": "log", "data": line})
+        dead = []
+        for ws in list(self.log_ws):
+            try:
+                await ws.send(msg)
+            except Exception:
+                logger.error(f"Error sending log to WS client. Marking as dead.")
+                dead.append(ws)
+        for d in dead:
+            self.log_ws.discard(d)
+
+    async def handle_command_response(self, ip: str, header_payload: dict, actual_data_bytes: bytes):
+        response_info = f"CMD_RESP from {ip} - FN:{header_payload.get('fn', 'N/A')}, STAGE:{header_payload.get('stage', 'N/A')}"
+        if actual_data_bytes:
+            try:
+                data_preview = actual_data_bytes.decode('utf-8', errors='ignore').strip()
+                if len(data_preview) > 50:
+                    data_preview = data_preview[:50] + "..."
+                response_info += f", DATA: '{data_preview}'"
+            except:
+                response_info += f", DATA_HEX: {actual_data_bytes.hex()}"
+        else:
+            response_info += ", DATA: (empty)"
+
+        logger.info(f"Received command response: {response_info}")
+        await self.broadcast_log(response_info)
+
+    async def ws_handler(self, websocket, path):
+        try:
+            logger.debug(f"WebSocket connection opened. Remote Address: {websocket.remote_address}, Path: {path}")
+            try:
+                msg = await asyncio.wait_for(websocket.recv(), timeout=2.0)
+                reg = json.loads(msg) if msg else {}
+            except Exception as e:
+                logger.error(f"Error during WebSocket registration for {websocket.remote_address}: {e}")
+                reg = {}
+            typ = reg.get("type")
+            if typ == "log":
+                self.log_ws.add(websocket)
+                await websocket.send(json.dumps({"type":"info","data":"log_ws_ok"}))
+                try:
+                    async for _ in websocket: # Keep connection open
+                        pass
+                except websockets.ConnectionClosed:
+                    logger.info(f"Log WebSocket {websocket.remote_address} closed.")
+                except Exception as e:
+                    logger.error(f"Error in log WebSocket loop {websocket.remote_address}: {e}")
+                finally:
+                    self.log_ws.discard(websocket)
+            elif typ == "devices":
+                self.dev_ws.add(websocket)
+                with self.devices_lock:
+                    snap = [{"ip": ip, "id": info["id"], "status": info["status"]} for ip, info in self.devices.items()]
+                await websocket.send(json.dumps({"type":"devices","data":snap}))
+                try:
+                    async for _ in websocket: # Keep connection open
+                        pass
+                except websockets.ConnectionClosed:
+                    logger.info(f"Device WebSocket {websocket.remote_address} closed.")
+                except Exception as e:
+                    logger.error(f"Error in device WebSocket loop {websocket.remote_address}: {e}")
+                finally:
+                    self.dev_ws.discard(websocket)
+            else:
+                logger.warning(f"Unknown WebSocket registration type: {typ} from {websocket.remote_address}")
+                await websocket.send(json.dumps({"type":"info","data":"unknown registration"}))
+                await websocket.close()
+        except websockets.ConnectionClosed:
+            logger.info(f"WebSocket {websocket.remote_address} initially closed.")
+        except Exception:
+            logger.exception("An unhandled exception occurred in ws_handler.")
+
+class ApiHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, directory=None, state: ServerState = None, **kwargs):
+        self.server_state = state
+        super().__init__(*args, directory=directory, **kwargs)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/"):
+            self.handle_api_get(parsed.path)
+            return
+        if parsed.path == '/':
+            self.path = '/index.html'
+        try:
+            super().do_GET()
+        except Exception as e:
+            self.send_error(404, f"File not found: {self.path}. Error: {e}")
+            logger.error(f"HTTP GET error for path {self.path}: {e}")
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/"):
+            self.handle_api_post(parsed.path)
+            return
+        self.send_response(404)
+        self.end_headers()
+        self.wfile.write(b"Not found")
+        logger.warning(f"HTTP POST to unknown path: {self.path}")
+
+    def handle_api_get(self, path):
+        if path == "/api/devices":
+            with self.server_state.devices_lock:
+                snap = [{"ip": ip, "id": info["id"], "status": info["status"]} for ip, info in self.server_state.devices.items()]
+            data = json.dumps({"status": "ok", "devices": snap}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            logger.debug(f"Served /api/devices with {len(snap)} devices.")
+            return
+        elif path == "/api/scanner_status":
+            status = "running" if self.server_state.discovery_server and self.server_state.discovery_server.running else "stopped"
+            data = json.dumps({"status": "ok", "scanner_status": status}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            logger.debug(f"Served /api/scanner_status with status: {status}")
+            return
+        elif path == "/api/log_server_status":
+            status = "running" if self.server_state.log_server and self.server_state.log_server.running else "stopped"
+            data = json.dumps({"status": "ok", "log_server_status": status}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            logger.debug(f"Served /api/log_server_status with status: {status}")
+            return
+        self.send_response(404)
+        self.end_headers()
+        self.wfile.write(b"Not found")
+        logger.warning(f"API GET to unknown path: {path}")
+
+    # Removed the duplicate do_POST method here
+
+    def handle_api_post(self, path):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length) if length > 0 else b""
+        try:
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except Exception:
+            data = {}
+            logger.warning(f"Failed to parse JSON body for {path}. Body: {body.decode('utf-8', errors='ignore')}")
+
+        try:
+            if path == "/api/scanner/start":
+                if self.server_state.discovery_server and self.server_state.discovery_server.running:
+                    self._send_json(200, {"status": "scanner_already_running"})
+                    logger.info("Scanner start API called, but already running.")
+                    return
+                self.server_state.discovery_server = UdpDiscoveryServer(on_device_found=self.server_state.update_devices)
+                self.server_state.discovery_server.start()
+                self._send_json(200, {"status": "scanner_started"})
+                logger.info("Scanner API called, Discovery server started.")
+                return
+            
+            elif path == "/api/scanner/stop":
+                if not self.server_state.discovery_server or not self.server_state.discovery_server.running:
+                    self._send_json(200, {"status": "scanner_not_running"})
+                    logger.info("Scanner stop API called, but not running.")
+                    return
+                self.server_state.discovery_server.stop()
+                self.server_state.discovery_server.join(timeout=1.0)
+                self.server_state.discovery_server = None
+                self._send_json(200, {"status": "scanner_stopped"})
+                logger.info("Discovery server stopped.")
+                return
+
+            elif path == "/api/scan":
+                if not self.server_state.discovery_server or not self.server_state.discovery_server.running:
+                    logger.info("Scan API called, but scanner was not running. Starting it now.")
+                    self.server_state.discovery_server = UdpDiscoveryServer(on_device_found=self.server_state.update_devices)
+                    self.server_state.discovery_server.start()
+                    self._send_json(200, {"status": "scanner_started_and_scanned"})
+                else:
+                    self._send_json(200, {"status": "scanner_already_running_and_scanned"})
+                logger.info("Scan API called, ensured Discovery server is active.")
+                return
+
+            elif path == "/api/connect":
+                ip = data.get("ip")
+                if not ip:
+                    self._send_json(400, {"status":"error","reason":"no ip"})
+                    logger.warning("Connect API called without IP.")
+                    return
+                ok = self.server_state.connector.connect(ip) 
+                if ok:
+                    self.server_state.set_device_status(ip, "Connected")
+                    self._send_json(200, {"status":"connected"})
+                    logger.info(f"Connected to device {ip}.")
+                else:
+                    self.server_state.set_device_status(ip, "Available")
+                    self._send_json(500, {"status":"error"})
+                    logger.error(f"Failed to connect to device {ip}.")
+                return
+
+            elif path == "/api/disconnect":
+                ip = data.get("ip")
+                if not ip:
+                    self._send_json(400, {"status":"error","reason":"no ip"})
+                    logger.warning("Disconnect API called without IP.")
+                    return
+                
+                try:
+                    future = asyncio.run_coroutine_threadsafe(self.server_state.connector.disconnect(ip), self.server_state.loop)
+                    future.result(timeout=5.0)
+                    self.server_state.set_device_status(ip, "Available")
+                    self._send_json(200, {"status":"disconnected"})
+                    logger.info(f"Disconnected from device {ip}.")
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout waiting for disconnect of {ip} to complete.")
+                    self._send_json(500, {"status":"error", "reason": "disconnect timeout"})
+                except Exception as e:
+                    logger.error(f"Error during disconnect for {ip}: {e}")
+                    self._send_json(500, {"status":"error", "reason": str(e)})
+                return
+
+            elif path == "/api/send":
+                ip = data.get("ip")
+                if not ip:
+                    self._send_json(400, {"status":"error","reason":"no ip"})
+                    logger.warning("Send API called without IP.")
+                    return
+                payload = None
+                if all(k in data for k in ("fn","stage","data_base64")):
+                    b = base64_to_bytes(data["data_base64"])
+                    payload = encode_request(int(data["fn"]), int(data["stage"]), b)
+                    logger.debug(f"Sending protocol payload (fn={data['fn']}, stage={data['stage']}) to {ip}. Data: '{data['data_base64'][:50]}...'")
+                else:
+                    self._send_json(400, {"status":"error","reason":"no payload"})
+                    logger.warning(f"Send API called for {ip} with invalid payload format.")
+                    return
+                
+                ok = self.server_state.connector.send(ip, payload)
+                self._send_json(200, {"status": "sent" if ok else "error"})
+                if ok:
+                    logger.info(f"Payload sent successfully to {ip}.")
+                else:
+                    logger.error(f"Failed to send payload to {ip}.")
+                return
+
+            elif path == "/api/log/start":
+                if self.server_state.log_server and self.server_state.log_server.running:
+                    self._send_json(200, {"status":"already_running"})
+                    logger.info("Log server start API called, but already running.")
+                    return
+                def on_receive(line):
+                    asyncio.run_coroutine_threadsafe(self.server_state.broadcast_log(line), self.server_state.loop)
+                self.server_state.log_server = UdpLogServer(on_receive=on_receive)
+                self.server_state.log_server.start()
+                self._send_json(200, {"status":"started"})
+                logger.info("Log server started.")
+                return
+
+            elif path == "/api/log/stop":
+                if not self.server_state.log_server or not self.server_state.log_server.running:
+                    self._send_json(200, {"status":"not_running"})
+                    logger.info("Log server stop API called, but not running.")
+                    return
+                self.server_state.log_server.stop()
+                self.server_state.log_server.join(timeout=1.0)
+                self.server_state.log_server = None
+                self._send_json(200, {"status":"stopped"})
+                logger.info("Log server stopped.")
+                return
+
+            else:
+                self._send_json(404, {"status":"not_found"})
+                logger.warning(f"API POST to unknown path: {path}")
+        except Exception as e:
+            logger.exception(f"An unhandled exception occurred in handle_api_post for path {path}.")
+            self._send_json(500, {"status":"error", "reason": str(e)})
+
+    def _send_json(self, code: int, obj):
+        data = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+def run_http_server(state: ServerState, static_dir: str, port: int = HTTP_PORT):
+    handler = lambda *args, **kwargs: ApiHandler(*args, directory=static_dir, state=state, **kwargs)
+    server = HTTPServer(("", port), handler)
+    logger.info(f"HTTP server serving static + API at http://0.0.0.0:{port}")
+    server.serve_forever()
+
+async def main_startup_logic(): # Renamed to clearly indicate this is the primary startup
+    global main_loop_state_instance # Access the global instance
+    
+    loop = asyncio.get_event_loop()
+    main_loop_state_instance = ServerState(loop) # Create ONE ServerState instance
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    if not os.path.isdir(static_dir):
+        logger.error(f"Static directory missing: {static_dir}")
+        return
+
+    t = threading.Thread(target=run_http_server, args=(main_loop_state_instance, static_dir, HTTP_PORT), daemon=True)
+    t.start()
+
+    logger.info(f"WebSocket server starting on 0.0.0.0:{WS_PORT}")
+    start_server = websockets.serve(main_loop_state_instance.ws_handler, "", WS_PORT)
+
+    # === 自动启动 FTP 服务器 ===
+    main_loop_state_instance.ftp_server = ProbeFtpServer(host="0.0.0.0", port=2121, username="user", password="12345") # Create ONE FTP Server instance
+    main_loop_state_instance.ftp_server.start() # Start it ONE time
+    logger.info("FTP Server automatically started in the background.")
+    # ==========================
+
+    async with start_server:
+        logger.info(f"UDP Discovery Server is initially stopped as per requirement.")
+        await asyncio.Future() 
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.DEBUG, 
+        format='%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    logger.info("Starting probe web service...")
+    main_loop_state_instance: Optional[ServerState] = None # Declare global here
+    try:
+        asyncio.run(main_startup_logic()) # Call the single startup function
+    except KeyboardInterrupt:
+        logger.info("Shutting down due to KeyboardInterrupt...")
+    finally:
+        # Cleanup logic remains the same, operating on the single main_loop_state_instance
+        if main_loop_state_instance and main_loop_state_instance.discovery_server:
+            main_loop_state_instance.discovery_server.stop()
+            main_loop_state_instance.discovery_server.join(timeout=1.0)
+            logger.info("Discovery server stopped during shutdown.")
+        if main_loop_state_instance and main_loop_state_instance.log_server:
+            main_loop_state_instance.log_server.stop()
+            main_loop_state_instance.log_server.join(timeout=1.0)
+            logger.info("Log server stopped during shutdown.")
+        # === 确保 FTP 服务器在关闭时停止 ===
+        if main_loop_state_instance and main_loop_state_instance.ftp_server:
+            logger.info("Attempting to stop FTP server during shutdown.")
+            if hasattr(main_loop_state_instance.ftp_server, 'stop') and callable(main_loop_state_instance.ftp_server.stop):
+                main_loop_state_instance.ftp_server.stop() 
+                main_loop_state_instance.ftp_server.join(timeout=3.0) 
+                logger.info("FTP server stopped during shutdown.")
+            else:
+                logger.warning(f"FTP server object during shutdown lacks callable 'stop' method. Type: {type(main_loop_state_instance.ftp_server)}")
+        # ===================================
+        if main_loop_state_instance and main_loop_state_instance.connector:
+            loop = asyncio.get_event_loop() # Ensure to get the correct event loop for cleanup
+            disconnect_tasks = []
+            # Iterate over a copy of keys, as the dictionary might change during disconnect
+            for ip in list(main_loop_state_instance.connector.connections.keys()): 
+                logger.info(f"Scheduling disconnect for {ip} during shutdown.")
+                # asyncio.run_coroutine_threadsafe needs the loop to be running, which it might not be during shutdown.
+                # A better approach for final cleanup after the loop has potentially stopped is direct await if possible,
+                # or handle the future's result directly after it's been run.
+                # For this specific context, where asyncio.run has just finished, the loop might still be accessible.
+                # However, for a clean shutdown, it's safer to use loop.call_soon_threadsafe or ensure the loop is managed.
+                
+                # Simplified approach for shutdown:
+                # If the loop is already closed or shutting down, run_coroutine_threadsafe might fail.
+                # Let's try to directly await if we're in an async context, or use loop.create_task and then gather.
+                # For `finally` block after asyncio.run, we are in a synchronous context again.
+                # The Connector.disconnect is an async method. We need an event loop to run it.
+                # If the main loop has already stopped (after `await asyncio.Future()`), we can't easily schedule new tasks.
+                # A more robust shutdown might involve explicitly managing the main_loop_state_instance
+                # and calling its async cleanup methods within an active event loop before it fully stops.
+                
+                # For now, let's keep the run_coroutine_threadsafe but acknowledge it might fail if the loop is gone.
+                # A better approach would be to have a dedicated async cleanup function called before asyncio.run exits.
+                try:
+                    task_future = asyncio.run_coroutine_threadsafe(main_loop_state_instance.connector.disconnect(ip), loop)
+                    disconnect_tasks.append(task_future)
+                except RuntimeError as e:
+                    logger.warning(f"Could not schedule disconnect for {ip} during shutdown, loop might be closing: {e}")
+            
+            if disconnect_tasks:
+                for task_future in disconnect_tasks:
+                    try:
+                        task_future.result(timeout=1.0)
+                    except (asyncio.TimeoutError, Exception) as e:
+                        logger.warning(f"Timeout or error waiting for shutdown disconnect task: {e}")
+            logger.info("All active device connections cleanup initiated during shutdown.")
+./start.sh
+#!/bin/bash
+
+#================================================================
+#   
+#   
+#   文件名称：start.sh
+#   创 建 者：肖飞
+#   创建日期：2025年11月18日 星期二 09时46分19秒
+#   修改日期：2025年11月18日 星期二 14时08分42秒
+#   描    述：
+#
+#================================================================
+function main() {
+	virtualenv -p /usr/bin/python3.10 venv
+	. venv/bin/activate
+	pip install websockets==10.4
+	pip install pyftpdlib
+	python app.py
+}
+
+main $@
+./static/index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Probe Web Tool</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="main-layout-wrapper">
+        <header>
+            <h1>Probe Web Tool</h1>
+        </header>
+
+        <div class="content-area">
+            <aside class="side-panel">
+                <div class="section">
+                    <h2>Device Discovery</h2>
+                    <button id="startScannerButton">Start Scanner</button>
+                    <button id="stopScannerButton" disabled>Stop Scanner</button>
+                    <button id="scanButton">Refresh Devices</button>
+                    <ul id="deviceList"></ul>
+                </div>
+                <div class="section">
+                    <h2>Device Control</h2>
+                    <select id="deviceSelect">
+                        <option value="">-- Select a device --</option>
+                    </select>
+                    <button id="connectButton">Connect</button>
+                    <button id="disconnectButton" disabled>Disconnect</button>
+                </div>
+                <!-- 移除 FTP Server Control Section -->
+            </aside>
+
+            <main class="center-content">
+                <div class="section log-section">
+                    <div class="log-header-controls">
+                        <h2>Log Stream</h2>
+                        <div class="log-buttons-group">
+                            <button id="startLogButton" class="small-button">Start Log</button>
+                            <button id="stopLogButton" class="small-button" disabled>Stop Log</button>
+                            <button id="clearLogButton" class="small-button">Clear Log</button>
+                        </div>
+                    </div>
+                    <div id="logOutput" class="log-area"></div>
+                </div>
+            </main>
+        </div>
+
+        <footer class="bottom-command-panel">
+            <div class="section command-section">
+                <h3>Send Command (Text)</h3>
+                <input type="text" id="commandInput" placeholder="Enter text command">
+                <button id="sendCommandButton" disabled>Send Text Command</button>
+            </div>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+./static/style.css
+/* static/style.css */
+body {
+    font-family: Arial, sans-serif;
+    margin: 0; /* 移除body默认margin */
+    background-color: #f4f4f4;
+    color: #333;
+    display: flex; /* 让body成为flex容器，用于居中主布局 */
+    min-height: 100vh; /* 确保body至少占据整个视口高度 */
+}
+
+.main-layout-wrapper {
+    display: flex;
+    flex-direction: column; /* 垂直堆叠 header, content-area, footer */
+    width: 100%; /* 占据父容器（body）的全部宽度 */
+    /* max-width: 1200px; /* 已移除，让它尽可能宽 */
+    height: calc(100vh - 40px); /* 占据视口高度减去上下margin，实现固定高度 */
+    margin: 20px auto; /* 上下20px, 左右自动，实现水平居中 */
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    overflow: hidden; /* 确保圆角和子元素不溢出 */
+}
+
+header {
+    padding: 10px 20px;
+    border-bottom: 1px solid #eee;
+    flex-shrink: 0; /* 不允许header收缩 */
+}
+
+header h1 {
+    margin: 0;
+    color: #0056b3;
+}
+
+.content-area {
+    display: flex; /* 让侧边栏和中心内容并排 */
+    flex-grow: 1; /* 占据header和footer之间的所有可用垂直空间 */
+    overflow: hidden; /* 确保内部滚动区域不会导致content-area溢出 */
+}
+
+.side-panel {
+    flex: 0 0 300px; /* 固定侧边栏宽度为300px */
+    padding: 20px;
+    border-right: 1px solid #eee;
+    display: flex;
+    flex-direction: column; /* 侧边栏内部内容垂直堆叠 */
+    gap: 20px; /* 侧边栏内部section的间距 */
+    overflow-y: auto; /* 侧边栏内容过多时可滚动 */
+    flex-shrink: 0; /* 不允许侧边栏收缩 */
+}
+
+.center-content {
+    flex-grow: 1; /* 中心内容占据剩余的所有水平空间 */
+    padding: 20px;
+    display: flex;
+    flex-direction: column; /* 中心内容内部垂直堆叠 */
+    overflow: hidden; /* 确保日志区内部滚动不会导致center-content溢出 */
+}
+
+.log-section {
+    flex-grow: 1; /* 日志部分占据中心内容区域的所有可用垂直空间 */
+    display: flex;
+    flex-direction: column; /* 日志部分内部垂直堆叠 */
+    overflow: hidden; /* 确保日志区内部滚动不会导致log-section溢出 */
+}
+
+.log-header-controls {
+    display: flex;
+    justify-content: space-between; /* 标题和按钮组左右对齐 */
+    align-items: center; /* 垂直居中对齐 */
+    margin-bottom: 10px; /* 与日志区域的间距 */
+    flex-shrink: 0; /* 不允许收缩 */
+}
+
+.log-buttons-group { /* 移除了 .ftp-controls-group 的合并样式 */
+    display: flex;
+    gap: 5px; /* 按钮之间的间距 */
+    align-items: center; /* 垂直居中对齐 */
+}
+
+/* 移除 .ftp-controls-group span 的样式
+.ftp-controls-group span {
+    font-size: 0.9em;
+    color: #555;
+    margin-left: 5px;
+}
+*/
+
+.log-area {
+    flex-grow: 1; /* 实际的日志输出框占据日志部分的所有可用垂直空间 */
+    border: 1px solid #ccc;
+    background-color: #333;
+    color: #0f0;
+    padding: 10px;
+    min-height: 100px; /* 最小高度，保证可滚动 */
+    overflow-y: scroll; /* 确保内容溢出时有滚动条 */
+    font-family: monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+    flex-shrink: 1; /* 允许日志区域根据需要收缩 */
+    display: flex; /* 确保内部内容在滚动时表现良好 */
+    flex-direction: column-reverse; /* 新日志在顶部，这里改为 column-reverse 是为了让滚动条默认在底部 */
+}
+
+
+.bottom-command-panel {
+    flex-shrink: 0; /* 不允许底部命令面板收缩 */
+    padding: 10px 20px;
+    border-top: 1px solid #eee;
+}
+
+.command-section {
+    display: flex; /* 使输入框和按钮并排 */
+    align-items: center; /* 垂直居中对齐 */
+    gap: 10px; /* 输入框和按钮之间的间距 */
+}
+
+.command-section h3 {
+    margin: 0; /* 移除标题默认margin */
+    white-space: nowrap; /* 防止标题换行 */
+    flex-shrink: 0; /* 不允许标题收缩 */
+}
+
+.command-section input[type="text"] {
+    flex-grow: 1; /* 输入框占据大部分可用空间 */
+    margin: 0; /* 移除默认margin */
+    width: auto; /* 重置宽度，由flex-grow控制 */
+}
+
+.command-section button {
+    flex-shrink: 0; /* 按钮不收缩 */
+    margin: 0; /* 移除默认margin */
+    width: auto; /* 按钮宽度自适应内容 */
+}
+
+/* 通用 section 样式调整 */
+.section {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+/* 按钮和输入框的通用样式 */
+button, input[type="text"], select { /* 移除了 input[type="number"], textarea */
+    padding: 8px 12px;
+    margin: 5px 0; 
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 1em;
+    box-sizing: border-box; 
+}
+
+button {
+    background-color: #007bff;
+    color: white;
+    cursor: pointer;
+    border: none;
+    transition: background-color 0.2s;
+}
+
+button:hover:not(:disabled) {
+    background-color: #0056b3;
+}
+
+button:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+}
+
+/* 小型按钮样式 */
+.small-button {
+    padding: 5px 10px; /* 更小的内边距 */
+    font-size: 0.85em; /* 更小的字体 */
+}
+
+input[type="text"], select {
+    width: 100%;
+}
+
+#deviceList {
+    list-style: none;
+    padding: 0;
+    border: 1px solid #eee;
+    max-height: 200px; /* 限制设备列表高度，使其可滚动 */
+    overflow-y: auto;
+    margin-top: 5px;
+}
+
+#deviceList li {
+    padding: 10px;
+    border-bottom: 1px solid #eee;
+    background-color: #f9f9f9;
+}
+
+#deviceList li:last-child {
+    border-bottom: none;
+}
+
+/* 命令响应的样式 */
+.command-response {
+    color: #ffd700;
+    font-weight: bold;
+}
+./static/script.js
+// static/script.js
+
+document.addEventListener('DOMContentLoaded', () => {
+    // === WebSocket 连接设置 ===
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsLog = new WebSocket(`${wsProtocol}//${window.location.hostname}:8001`); // Log WebSocket
+    const wsDevices = new WebSocket(`${wsProtocol}//${window.location.hostname}:8001`); // Device WebSocket
+
+    // === 获取所有前端元素 ===
+    // Device Discovery Section
+    const startScannerButton = document.getElementById('startScannerButton');
+    const stopScannerButton = document.getElementById('stopScannerButton');
+    const scanButton = document.getElementById('scanButton'); // "Refresh Devices" button
+    const deviceList = document.getElementById('deviceList');
+
+    // Device Control Section
+    const deviceSelect = document.getElementById('deviceSelect');
+    const connectButton = document.getElementById('connectButton');
+    const disconnectButton = document.getElementById('disconnectButton');
+    
+    // Send Command (Text) Section
+    const commandInput = document.getElementById('commandInput');
+    const sendCommandButton = document.getElementById('sendCommandButton');
+    
+    // Log Stream Section
+    const startLogButton = document.getElementById('startLogButton');
+    const stopLogButton = document.getElementById('stopLogButton');
+    const clearLogButton = document.getElementById('clearLogButton'); // Clear Log button
+    const logOutput = document.getElementById('logOutput');
+
+    // FTP Server Control Section (已移除前端元素，所以无需获取其引用)
+    // const startFtpButton = document.getElementById('startFtpButton');
+    // const stopFtpButton = document.getElementById('stopFtpButton');
+    // const ftpStatusText = document.getElementById('ftpStatusText');
+
+    // === 内部状态变量 ===
+    let currentDevices = []; // To store the latest device snapshot
+    let scannerIsRunning = false; // To track the state of the scanner (started/stopped)
+    let logServerIsRunning = false; // To track the state of the log server (started/stopped)
+    // let ftpServerIsRunning = false; // FTP 服务器现在在后台自动运行，前端无需跟踪其状态
+
+
+    // === UI 更新函数 ===
+
+    /**
+     * 更新设备控制按钮（Connect, Disconnect, Send Command）的状态
+     * 基于当前选中的设备及其连接状态。
+     */
+    function updateDeviceControlButtons() {
+        console.log('JS DEBUG: updateDeviceControlButtons called.');
+        const selectedIp = deviceSelect.value;
+        const selectedDevice = currentDevices.find(d => d.ip === selectedIp);
+        const isConnected = selectedDevice && selectedDevice.status === 'Connected';
+
+        connectButton.disabled = !selectedIp || isConnected;
+        disconnectButton.disabled = !selectedIp || !isConnected;
+        sendCommandButton.disabled = !isConnected; 
+        console.log(`JS DEBUG: Buttons updated. Selected IP: ${selectedIp}, Connected: ${isConnected}`);
+    }
+
+    /**
+     * 更新扫描器控制按钮（Start/Stop Scanner, Refresh Devices）的状态。
+     */
+    function updateScannerButtons() {
+        startScannerButton.disabled = scannerIsRunning;
+        stopScannerButton.disabled = !scannerIsRunning;
+        scanButton.disabled = false; // "Refresh Devices" button is always available to trigger a scan or refresh
+        console.log(`JS DEBUG: Scanner buttons updated. Running: ${scannerIsRunning}`);
+    }
+
+    /**
+     * 更新日志服务器控制按钮（Start/Stop Log）的状态。
+     */
+    function updateLogServerButtons() {
+        startLogButton.disabled = logServerIsRunning;
+        stopLogButton.disabled = !logServerIsRunning;
+        console.log(`JS DEBUG: Log Server buttons updated. Running: ${logServerIsRunning}`);
+    }
+
+    // 移除 updateFtpServerButtons
+    // function updateFtpServerButtons() {
+    //     startFtpButton.disabled = ftpServerIsRunning;
+    //     stopFtpButton.disabled = !ftpServerIsRunning;
+    //     ftpStatusText.textContent = `Status: ${ftpServerIsRunning ? 'Running' : 'Stopped'}`;
+    //     console.log(`JS DEBUG: FTP Server buttons updated. Running: ${ftpServerIsRunning}`);
+    // }
+
+    /**
+     * 根据设备列表数据更新前端的设备列表 `<ul>`。
+     * @param {Array<Object>} devices - 包含设备信息的数组。
+     */
+    function updateDeviceList(devices) {
+        console.log('JS DEBUG: updateDeviceList called with devices:', devices);
+        deviceList.innerHTML = ''; // Clear current list
+        if (!devices || devices.length === 0) {
+            deviceList.innerHTML = '<li>No devices found. Start scanner and click "Refresh Devices"</li>';
+            console.log('JS DEBUG: No devices to populate list.');
+            return;
+        }
+        devices.forEach(device => {
+            if (device.ip && device.id !== undefined && device.id !== null) {
+                const li = document.createElement('li');
+                li.textContent = `${device.ip}-[${device.id}] Status: ${device.status}`;
+                deviceList.appendChild(li);
+                console.log(`JS DEBUG: Added list item for IP: ${device.ip}, ID: '${device.id}'`);
+            } else {
+                console.warn(`JS WARNING: updateDeviceList skipping device with invalid IP or ID. Device object:`, device);
+            }
+        });
+    }
+
+    /**
+     * 根据设备列表数据更新前端的设备选择下拉菜单 `<select>`。
+     * @param {Array<Object>} devices - 包含设备信息的数组。
+     */
+    function updateDeviceSelect(devices) {
+        console.log('JS DEBUG: updateDeviceSelect called with devices:', devices);
+        const selectedIp = deviceSelect.value; // Remember currently selected IP
+        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>'; // Clear and add default option
+        if (!devices || devices.length === 0) {
+            console.log('JS DEBUG: No devices to populate select dropdown.');
+            updateDeviceControlButtons(); // Still update control buttons even if no devices
+            return;
+        }
+        devices.forEach(device => {
+            if (device.ip && device.id !== undefined && device.id !== null) {
+                const option = document.createElement('option');
+                option.value = device.ip;
+                option.textContent = `${device.id} (${device.ip}) - ${device.status}`;
+                if (device.ip === selectedIp) { // Restore selection if device still exists
+                    option.selected = true;
+                }
+                deviceSelect.appendChild(option);
+                console.log(`JS DEBUG: Added option for IP: ${device.ip}, ID: '${device.id}'`);
+            } else {
+                console.warn(`JS WARNING: updateDeviceSelect skipping device with invalid IP or ID. Device object:`, device);
+            }
+        });
+        updateDeviceControlButtons(); // Update control buttons after select is populated
+    }
+
+    /**
+     * 从后端API获取当前扫描器的运行状态并更新UI。
+     */
+    async function fetchScannerStatus() {
+        try {
+            const response = await fetch('/api/scanner_status');
+            const data = await response.json();
+            scannerIsRunning = (data.scanner_status === 'running');
+            updateScannerButtons();
+            console.log(`JS DEBUG: Fetched scanner status: ${data.scanner_status}, scannerIsRunning: ${scannerIsRunning}`);
+        } catch (error) {
+            console.error('JS ERROR: Error fetching scanner status:', error);
+            scannerIsRunning = false; // Assume stopped if error
+            updateScannerButtons();
+        }
+    }
+
+    /**
+     * 从后端API获取当前日志服务器的运行状态并更新UI。
+     */
+    async function fetchLogServerStatus() {
+        try {
+            const response = await fetch('/api/log_server_status');
+            const data = await response.json();
+            logServerIsRunning = (data.log_server_status === 'running');
+            updateLogServerButtons();
+            console.log(`JS DEBUG: Fetched log server status: ${data.log_server_status}, logServerIsRunning: ${logServerIsRunning}`);
+        } catch (error) {
+            console.error('JS ERROR: Error fetching log server status:', error);
+            logServerIsRunning = false; // Assume stopped if error
+            updateLogServerButtons();
+        }
+    }
+
+    // 移除 fetchFtpServerStatus
+    // async function fetchFtpServerStatus() {
+    //     try {
+    //         const response = await fetch('/api/ftp_status');
+    //         const data = await response.json();
+    //         ftpServerIsRunning = (data.ftp_status === 'running');
+    //         updateFtpServerButtons();
+    //         console.log(`JS DEBUG: Fetched FTP server status: ${data.ftp_status}, ftpServerIsRunning: ${ftpServerIsRunning}`);
+    //     } catch (error) {
+    //         console.error('JS ERROR: Error fetching FTP server status:', error);
+    //         ftpServerIsRunning = false;
+    //         updateFtpServerButtons();
+    //     }
+    // }
+
+
+    // === WebSocket Handlers ===
+
+    // Device WebSocket: Handles real-time device list updates
+    wsDevices.onopen = () => {
+        console.log('JS DEBUG: Connected to device WebSocket. Sending registration...');
+        wsDevices.send(JSON.stringify({ type: 'devices' })); 
+        console.log('JS DEBUG: Sent device WebSocket registration message.');
+        // 页面加载后立即同步所有服务状态
+        fetchScannerStatus(); 
+        fetchLogServerStatus(); 
+        // 移除 fetchFtpServerStatus
+    };
+
+    wsDevices.onmessage = (event) => {
+        console.log('JS DEBUG: Received message on device WS:', event.data);
+        try {
+            const message = JSON.parse(event.data);
+            console.log('JS DEBUG: Parsed device message:', message);
+            if (message.type === 'devices') {
+                currentDevices = message.data;
+                console.log('JS DEBUG: currentDevices updated:', currentDevices);
+                updateDeviceList(currentDevices);
+                updateDeviceSelect(currentDevices);
+            } else if (message.type === 'info') { 
+                console.info('JS INFO: Device WS Info:', message.data);
+            }
+        } catch (e) {
+            console.error('JS ERROR: Error parsing device WS message:', e, event.data);
+        }
+    };
+
+    wsDevices.onclose = (event) => { 
+        console.log('JS DEBUG: Device WebSocket disconnected. Code:', event.code, 'Reason:', event.reason);
+    };
+
+    wsDevices.onerror = (error) => {
+        console.error('JS ERROR: Device WebSocket error:', error);
+    };
+
+    // Log WebSocket: Handles real-time log stream
+    wsLog.onopen = () => {
+        console.log('JS DEBUG: Connected to log WebSocket');
+        wsLog.send(JSON.stringify({ type: 'log' })); // Register for log updates
+    };
+
+    wsLog.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'log') {
+            const logLine = document.createElement('div');
+            if (message.data.startsWith('CMD_RESP from')) {
+                logLine.className = 'command-response'; 
+            }
+            logLine.textContent = message.data;
+            logOutput.prepend(logLine); // prepend: Newest logs at the top
+        }
+    };
+
+    wsLog.onclose = (event) => {
+        console.log('JS DEBUG: Log WebSocket disconnected. Code:', event.code, 'Reason:', event.reason);
+    };
+
+    wsLog.onerror = (error) => {
+        console.error('JS ERROR: Log WebSocket error:', error);
+    };
+
+
+    // === Event Listeners ===
+
+    // Device Discovery Buttons
+    startScannerButton.addEventListener('click', async () => {
+        startScannerButton.disabled = true; 
+        try {
+            const response = await fetch('/api/scanner/start', { method: 'POST' });
+            const data = await response.json();
+            console.log('JS DEBUG: Scanner start initiated:', data);
+            if (data.status === 'scanner_started' || data.status === 'scanner_already_running') {
+                scannerIsRunning = true;
+            }
+        } catch (error) {
+            console.error('JS ERROR: Error starting scanner:', error);
+        } finally {
+            updateScannerButtons(); 
+        }
+    });
+
+    stopScannerButton.addEventListener('click', async () => {
+        stopScannerButton.disabled = true; 
+        try {
+            const response = await fetch('/api/scanner/stop', { method: 'POST' });
+            const data = await response.json();
+            console.log('JS DEBUG: Scanner stop initiated:', data);
+            if (data.status === 'scanner_stopped' || data.status === 'scanner_not_running') {
+                scannerIsRunning = false;
+            }
+        } catch (error) {
+            console.error('JS ERROR: Error stopping scanner:', error);
+        } finally {
+            updateScannerButtons(); 
+        }
+    });
+
+    scanButton.addEventListener('click', async () => {
+        scanButton.disabled = true; 
+        try {
+            const response = await fetch('/api/scan', { method: 'POST' });
+            const data = await response.json();
+            console.log('JS DEBUG: Device list refresh/scan initiated:', data);
+            if (data.status.includes('scanner_started')) {
+                 scannerIsRunning = true; 
+            }
+        } catch (error) {
+            console.error('JS ERROR: Error initiating device list refresh:', error);
+        } finally {
+            scanButton.disabled = false; 
+            updateScannerButtons(); 
+        }
+    });
+
+    // Device Control Buttons
+    deviceSelect.addEventListener('change', updateDeviceControlButtons);
+
+    connectButton.addEventListener('click', async () => {
+        const ip = deviceSelect.value;
+        if (!ip) return; 
+
+        connectButton.disabled = true; 
+        try {
+            const response = await fetch('/api/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip })
+            });
+            const data = await response.json();
+            console.log(`JS DEBUG: Connect to ${ip}:`, data);
+        } catch (error) {
+            console.error(`JS ERROR: Error connecting to ${ip}:`, error);
+        } finally {
+            // UI will be updated via WebSocket push
+        }
+    });
+
+    disconnectButton.addEventListener('click', async () => {
+        const ip = deviceSelect.value;
+        if (!ip) return; 
+
+        disconnectButton.disabled = true; 
+        try {
+            const response = await fetch('/api/disconnect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip })
+            });
+            const data = await response.json();
+            console.log(`JS DEBUG: Disconnect from ${ip}:`, data);
+        } catch (error) {
+            console.error(`JS ERROR: Error disconnecting from ${ip}:`, error);
+        } finally {
+            // UI will be updated via WebSocket push
+        }
+    });
+
+    // Send Command (Text) Button Logic
+    sendCommandButton.addEventListener('click', async () => {
+        const ip = deviceSelect.value;
+        const text = commandInput.value;
+        if (!ip || !text) return; 
+
+        sendCommandButton.disabled = true; 
+        
+        let fnToSend = 0; 
+        const stageToSend = 0; 
+        const dataToSendRaw = text; 
+
+        const match = text.match(/^(\d+)/); 
+        if (match && match[1]) {
+            fnToSend = parseInt(match[1], 10);
+        } else {
+            fnToSend = 0; 
+        }
+
+        const dataToSendBase64 = btoa(unescape(encodeURIComponent(dataToSendRaw)));
+
+        try {
+            const response = await fetch('/api/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip, fn: fnToSend, stage: stageToSend, data_base64: dataToSendBase64 })
+            });
+            const data = await response.json();
+            console.log(`JS DEBUG: Sent protocol command (fn=${fnToSend}, stage=${stageToSend}, data='${dataToSendRaw}') to ${ip}:`, data);
+        } catch (error) {
+            console.error(`JS ERROR: Error sending command (fn=${fnToSend}, stage=${stageToSend}, data='${dataToSendRaw}') to ${ip}:`, error);
+        } finally {
+            sendCommandButton.disabled = false; 
+        }
+    });
+
+    // Log Server Buttons
+    startLogButton.addEventListener('click', async () => {
+        startLogButton.disabled = true; 
+        try {
+            const response = await fetch('/api/log/start', { method: 'POST' });
+            const data = await response.json();
+            console.log('JS DEBUG: Log server start initiated:', data);
+            if (data.status === 'started' || data.status === 'already_running') {
+                logServerIsRunning = true; 
+            }
+        } catch (error) {
+            console.error('JS ERROR: Error starting log server:', error);
+        } finally {
+            updateLogServerButtons(); 
+        }
+    });
+
+    stopLogButton.addEventListener('click', async () => {
+        stopLogButton.disabled = true; 
+        try {
+            const response = await fetch('/api/log/stop', { method: 'POST' });
+            const data = await response.json();
+            console.log('JS DEBUG: Log server stop initiated:', data);
+            if (data.status === 'stopped' || data.status === 'not_running') {
+                logServerIsRunning = false; 
+            }
+        } catch (error) {
+            console.error('JS ERROR: Error stopping log server:', error);
+        } finally {
+            updateLogServerButtons(); 
+        }
+    });
+
+    // === Clear Log Button ===
+    clearLogButton.addEventListener('click', () => {
+        logOutput.innerHTML = ''; 
+        console.log('JS DEBUG: Log output cleared.');
+    });
+
+
+    // === Initial Setup on Page Load ===
+    updateDeviceControlButtons(); 
+    fetchScannerStatus(); 
+    fetchLogServerStatus(); 
+});
+./protocol.py
+# protocol.py
+import struct
+import base64
+import logging # 导入 logging
+
+# 获取当前模块的日志器
+logger = logging.getLogger(__name__)
+
+# Constants from C++ request.h
+DEFAULT_REQUEST_MAGIC = 0xA5A55A5A
+
+# Define struct format strings for packing/unpacking
+# header_info_t: magic (I), total_size (I), data_size (I), data_offset (I), crc (B)
+HEADER_FORMAT = "<IIIIB" # Little-endian, 4x unsigned int, 1x unsigned char
+HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
+# payload_info_t: fn (I), stage (I)
+PAYLOAD_INFO_FORMAT = "<II" # Little-endian, 2x unsigned int
+PAYLOAD_INFO_SIZE = struct.calcsize(PAYLOAD_INFO_FORMAT)
+
+REQUEST_T_SIZE = HEADER_SIZE + PAYLOAD_INFO_SIZE # Total size of request_t struct without data
+
+def _calc_crc8(data: bytes) -> int:
+    """Calculates the CRC8 sum for a given byte sequence."""
+    crc = 0
+    for byte in data:
+        crc = (crc + byte) & 0xFF # Ensure it stays 8-bit
+    return crc
+
+def encode_request(fn: int, stage: int, data: bytes) -> bytes:
+    """
+    Encodes a request according to the custom protocol.
+    Mimics request_encode from request.cpp.
+    """
+    total_size = len(data)
+    data_size = len(data) # Assuming the entire data is sent as one chunk
+    data_offset = 0       # Assuming this is the first (and only) chunk
+
+    # Pack payload_info_t
+    payload_info_bytes = struct.pack(PAYLOAD_INFO_FORMAT, fn, stage)
+
+    # Calculate CRC over payload_info_t and actual data
+    crc_data = payload_info_bytes + data
+    crc = _calc_crc8(crc_data)
+
+    # Pack header_info_t
+    header_bytes = struct.pack(HEADER_FORMAT, 
+                               DEFAULT_REQUEST_MAGIC,
+                               total_size,
+                               data_size,
+                               data_offset,
+                               crc)
+
+    logger.debug(f"Encoded request: fn={fn}, stage={stage}, data_size={len(data)}, crc={crc:02x}")
+    return header_bytes + payload_info_bytes + data
+
+def text_to_request_bytes(text: str) -> bytes:
+    """Converts a text string into request data (e.g., for fn=0, stage=0)."""
+    return encode_request(fn=0, stage=0, data=text.encode('utf-8'))
+
+def base64_to_bytes(b64_string: str) -> bytes:
+    """Decodes a base64 string to bytes."""
+    try:
+        return base64.b64decode(b64_string)
+    except Exception as e:
+        logger.error(f"Failed to decode base64 string: {b64_string[:50]}... Error: {e}")
+        raise
+
+def decode_request(buffer: bytes) -> tuple[dict, bytes] | None:
+    """
+    Decodes a request buffer according to the custom protocol.
+    Mimics request_decode from request.cpp.
+    Returns (header_payload_dict, actual_data_bytes) or None if invalid/incomplete.
+    """
+    if len(buffer) < REQUEST_T_SIZE:
+        logger.debug(f"Decode Error: Incomplete buffer (len {len(buffer)} < {REQUEST_T_SIZE})")
+        return None
+
+    header_bytes = buffer[:HEADER_SIZE]
+    payload_info_bytes = buffer[HEADER_SIZE:REQUEST_T_SIZE]
+    
+    header_info = struct.unpack(HEADER_FORMAT, header_bytes)
+    magic, total_size, data_size, data_offset, crc_received = header_info
+
+    if magic != DEFAULT_REQUEST_MAGIC:
+        logger.debug(f"Decode Error: Magic invalid! Expected {DEFAULT_REQUEST_MAGIC:x}, got {magic:x}")
+        return None
+
+    # Check if we have enough data for the declared data_size
+    if len(buffer) < REQUEST_T_SIZE + data_size:
+        logger.debug(f"Decode Error: Incomplete data payload. Buffer len {len(buffer)}, expected {REQUEST_T_SIZE + data_size}")
+        return None
+        
+    actual_data_bytes = buffer[REQUEST_T_SIZE : REQUEST_T_SIZE + data_size]
+
+    # Calculate CRC over payload_info_t and actual data
+    crc_data = payload_info_bytes + actual_data_bytes
+    crc_calculated = _calc_crc8(crc_data)
+
+    if crc_received != crc_calculated:
+        logger.debug(f"Decode Error: CRC invalid! Expected {crc_calculated:02x}, got {crc_received:02x}")
+        return None
+
+    payload_info = struct.unpack(PAYLOAD_INFO_FORMAT, payload_info_bytes)
+    fn, stage = payload_info
+    
+    request_data = {
+        "magic": magic,
+        "total_size": total_size,
+        "data_size": data_size,
+        "data_offset": data_offset,
+        "crc": crc_received,
+        "fn": fn,
+        "stage": stage,
+    }
+    
+    logger.debug(f"Decoded request: fn={fn}, stage={stage}, data_size={data_size}, total_size={total_size}")
+    return request_data, actual_data_bytes
+./logger_server.py
+# logger_server.py
+import socket
+import threading
+import time
+import datetime
+import os
+from typing import Callable, Optional
+import logging # 导入 logging
+
+# 获取当前模块的日志器
+logger = logging.getLogger(__name__)
+
+# 更新端口为 probe_tool.h 中的 LOG_TOOL_PORT (同步为6002)
+LOG_TOOL_PORT = 6002 
+
+class UdpLogServer(threading.Thread):
+    def __init__(self, on_receive: Callable[[str], None], log_dir: str = "logs"):
+        super().__init__()
+        self.on_receive = on_receive
+        self.log_dir = log_dir
+        self.running = False
+        self.sock: Optional[socket.socket] = None
+        self.log_file_handle: Optional[object] = None 
+        self.log_file_path: Optional[str] = None
+        
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+            logger.info(f"Created log directory: {self.log_dir}")
+
+    def _open_log_file(self):
+        """打开一个新的日志文件，如果已存在则关闭旧的。"""
+        if self.log_file_handle:
+            self.log_file_handle.close()
+            self.log_file_handle = None
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file_path = os.path.join(self.log_dir, f"log_{timestamp}.txt")
+        try:
+            self.log_file_handle = open(self.log_file_path, "a", encoding="utf-8")
+            logger.info(f"Opened new log file: {self.log_file_path}")
+        except Exception as e:
+            logger.error(f"Error opening log file {self.log_file_path}: {e}")
+            self.log_file_handle = None
+
+    def run(self):
+        """线程主函数，监听UDP端口接收日志。"""
+        self.running = True
+        self._open_log_file() # 启动时打开日志文件
+
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # 允许地址重用
+            self.sock.bind(("", LOG_TOOL_PORT))
+            self.sock.settimeout(1.0) # 设置超时，以便循环可以检查self.running标志
+            logger.info(f"UDP Log Server listening on port {LOG_TOOL_PORT}")
+
+            while self.running:
+                try:
+                    data, addr = self.sock.recvfrom(4096)
+                    log_line = data.decode('utf-8', errors='ignore').strip()
+                    
+                    current_time = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S.%f]")[:-3]
+                    # 日志格式现在包含发送者IP，以与C++工具的日志源识别保持一致
+                    formatted_log = f"{current_time} [{addr[0]}:{addr[1]}] {log_line}"
+                    
+                    self.on_receive(formatted_log) # 调用回调函数，通常是推送到WebSocket
+
+                    if self.log_file_handle:
+                        self.log_file_handle.write(formatted_log + "\n")
+                        self.log_file_handle.flush() # 立即写入磁盘
+                        
+                except socket.timeout:
+                    pass # 超时是预期行为，用于检查self.running
+                except Exception as e:
+                    logger.error(f"Error in UDP log server: {e}")
+                    # 在发生意外错误时，也可能需要停止服务
+                    break 
+        finally:
+            self.stop() # 确保在线程结束时调用stop进行清理
+
+    def start(self):
+        """启动日志服务器线程。"""
+        if self.running:
+            logger.info("Log server is already running. No action taken by start().")
+            return
+
+        self.running = False # 将在self.run()中设置为True
+        self._open_log_file() # 每次启动都开新日志文件
+        super().start() # 调用threading.Thread的start方法，在单独线程中运行self.run()
+        logger.info("UDP Log Server starting...")
+            
+    def stop(self):
+        """停止日志服务器线程和关闭资源。"""
+        if self.running:
+            self.running = False # 设置标志，通知run方法退出循环
+            if self.sock:
+                self.sock.close() # 关闭socket，解除阻塞的recvfrom
+                self.sock = None
+            if self.log_file_handle:
+                self.log_file_handle.close() # 关闭日志文件
+                self.log_file_handle = None
+            logger.info("UDP Log Server stopped and log file closed.")
+./scanner.py
+# scanner.py
+import socket
+import threading
+import time
+from typing import Dict, Any, Callable, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+BROADCAST_PORT = 6000
+
+class UdpDiscoveryServer(threading.Thread):
+    def __init__(self, on_device_found: Callable[[str, str], None], port: int = BROADCAST_PORT):
+        super().__init__()
+        self.on_device_found = on_device_found
+        self.port = port
+        self.running = False
+        self.sock: Optional[socket.socket] = None
+        
+    def run(self):
+        self.running = True
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
+            self.sock.bind(("", self.port))
+            self.sock.settimeout(1.0)
+            logger.info(f"UDP Discovery Server listening for client probes on port {self.port}")
+
+            while self.running:
+                try:
+                    data, addr = self.sock.recvfrom(1024) # 缓冲区大小
+                    ip_address = addr[0]
+                    
+                    device_id_bytes = data
+                    # 查找第一个 null 终止符 (0x00)
+                    null_idx = device_id_bytes.find(b'\x00')
+                    if null_idx != -1:
+                        # 如果找到 null 终止符，只取它之前的部分
+                        device_id_bytes = device_id_bytes[:null_idx]
+                        logger.debug(f"Found null terminator at index {null_idx}. Truncating ID bytes.")
+                    
+                    # 解码为字符串，并移除首尾空白（虽然 C 字符串通常不带）
+                    response_str = device_id_bytes.decode('utf-8', errors='ignore').strip()
+                    device_id = ""
+
+                    if response_str: # 如果解码后的字符串不为空
+                        device_id = response_str
+                        logger.debug(f"Decoded non-empty ID from bytes: '{device_id}'")
+                    else:
+                        # 如果解码后仍为空（例如客户端只发送了0x00），则分配一个默认 ID
+                        device_id = f"Unnamed_Device_{ip_address.replace('.', '_')}"
+                        logger.warning(f"Received empty or null-only probe message from {ip_address}. Assigning default ID: {device_id}")
+                    
+                    if device_id: 
+                        logger.debug(f"Calling on_device_found for IP={ip_address}, ID='{device_id}'")
+                        self.on_device_found(ip_address, device_id)
+                    else:
+                        logger.warning(f"Skipping device discovery for {ip_address}: No valid ID could be determined from raw data {data.hex()}.")
+
+                except socket.timeout:
+                    pass
+                except Exception as e:
+                    logger.exception(f"Error in UDP Discovery Server for {ip_address}.")
+        finally:
+            self.stop()
+
+    def start(self):
+        if not self.running:
+            super().start()
+        else:
+            logger.info("Discovery server is already running.")
+
+    def stop(self):
+        if self.running:
+            self.running = False
+            if self.sock:
+                self.sock.close()
+                self.sock = None
+            logger.info("UDP Discovery Server stopped.")
+./ftp_server.py
+# ftp_server.py
+import os
+import threading
+import asyncio
+import logging
+import time
+
+from pyftpdlib.handlers import FTPHandler
+from pyftpdlib.authorizers import DummyAuthorizer
+from pyftpdlib.servers import FTPServer
+from pyftpdlib.ioloop import IOLoop # 确保导入了 pyftpdlib 的 IOLoop
+
+logger = logging.getLogger(__name__)
+
+# 配置 pyftpdlib 的日志器，提供更详细的输出
+logging.getLogger('pyftpdlib').setLevel(logging.DEBUG)
+logging.getLogger('pyftpdlib.servers').setLevel(logging.DEBUG)
+logging.getLogger('pyftpdlib.handlers').setLevel(logging.DEBUG)
+
+
+class ThrottledFTPHandler(FTPHandler):
+    def __init__(self, conn, server, ioloop=asyncio.get_event_loop()):
+        super().__init__(conn, server, ioloop=ioloop)
+        self.read_limit = 100 * 1024  # 100 KB/s
+        self.timeout = 300  # 控制连接超时，默认60s
+        self.data_timeout = 300  # 数据连接超时，默认30s
+
+    def on_incomplete_file_send(self, file):
+        logger.debug(f"FTP_HANDLER: Incomplete file send: {file}")
+        super().on_incomplete_file_send(file)
+
+    def on_file_send(self, file):
+        logger.debug(f"FTP_HANDLER: File sent: {file}")
+        super().on_file_send(file)
+
+    def on_login(self, username):
+        # 修正：将 logger.info 放到 super().on_login(username) 之后
+        super().on_login(username) 
+
+    def on_logout(self, username):
+        super().on_logout(username)
+
+    def on_disconnect(self):
+        # 修正：将 logger.info 放到 super().on_disconnect() 之后
+        super().on_disconnect() 
+    
+    def on_quit(self):
+        super().on_quit()
+
+    def ftp_CMD(self, line):
+        super().ftp_CMD(line)
+    
+    def send_reply(self, ftpcodes, msg=""):
+        super().send_reply(ftpcodes, msg)
+
+
+class ProbeFtpServer(threading.Thread):
+    def __init__(self, host="0.0.0.0", port=2121, username="user", password="123", anonymous_root="."):
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.anonymous_root = anonymous_root
+        self.server: Optional[FTPServer] = None
+        self.running = False
+
+        self.passive_ports_range = (50000, 50010) 
+        
+    def run(self):
+        self.running = True
+        logger.info(f"FTP_SERVER: Starting FTP server on {self.host}:{self.port}")
+        
+        authorizer = DummyAuthorizer()
+
+        current_dir = os.getcwd()
+        ftp_root = os.path.join(current_dir, "ftp_share")
+        if not os.path.exists(ftp_root):
+            os.makedirs(ftp_root)
+            logger.info(f"FTP_SERVER: Created FTP share directory: {ftp_root}")
+
+        authorizer.add_user(self.username, self.password, ftp_root, perm="elradfmw") 
+        authorizer.add_anonymous(ftp_root, perm="elr") 
+
+        handler = ThrottledFTPHandler
+        handler.authorizer = authorizer
+        handler.banner = "Welcome to Probe Tool FTP Server" 
+        
+        try:
+            self.server = FTPServer((self.host, self.port), handler)
+            logger.info("FTP_SERVER: Server ready to serve.")
+            
+            self.server.serve_forever() 
+        except Exception as e:
+            logger.error(f"FTP_SERVER: Error starting or running FTP server: {e}")
+        finally:
+            self.stop() 
+            logger.info("FTP_SERVER: Thread stopped.")
+
+    def start(self):
+        if not self.running:
+            super().start()
+        else:
+            logger.info("FTP_SERVER: Server is already running. No action taken by start().")
+
+    def stop(self):
+        if self.running:
+            self.running = False 
+            if self.server:
+                ioloop = IOLoop.instance()
+                if ioloop.running:
+                    logger.info("FTP_SERVER: Scheduling IOLoop stop for FTP server.")
+                    ioloop.add_callback(ioloop.stop)
+                else:
+                    logger.info("FTP_SERVER: IOLoop not running, no need to stop.")
+                self.server = None 
+            logger.info("FTP_SERVER: Server stopping.")
+./connector.py
+# connector.py
+import socket
+import threading
+import time
+from typing import Dict, Any, Callable, Optional
+import logging
+import asyncio # 新增导入 for asyncio tasks
+
+from protocol import decode_request, encode_request
+
+# 获取当前模块的日志器
+logger = logging.getLogger(__name__)
+
+PROBE_TOOL_PORT = 6001 # 客户端监听命令的端口
+
+class Connector:
+    def __init__(self, loop: asyncio.AbstractEventLoop, on_command_response: Optional[Callable[[str, dict, bytes], None]] = None):
+        self.loop = loop # 存储事件循环
+        # connections: Dict[ip, {"sock": socket_obj, "listener_thread": thread_obj, "stop_event": threading.Event, "keep_alive_task": asyncio.Task}]
+        self.connections: Dict[str, Dict[str, Any]] = {}
+        self.on_command_response = on_command_response
+        self.lock = threading.Lock()
+
+    async def _send_keep_alive(self, ip: str):
+        """
+        异步任务：每秒向指定IP发送保活消息。
+        """
+        logger.debug(f"Starting keep-alive for {ip}")
+        # fn=0xffffffff (对应C++中的unsigned int -1)
+        # stage=0
+        # data=b'\x00' (单个空字节，与C++示例一致)
+        keep_alive_payload = encode_request(fn=0xFFFFFFFF, stage=0, data=b'\x00')
+        
+        while True:
+            try:
+                # 检查连接是否仍然存在，并加锁访问socket
+                with self.lock:
+                    sock_info = self.connections.get(ip)
+                    # Only send if the socket is still open, exists in connections, and not explicitly stopping
+                    if sock_info and sock_info.get("sock") and not sock_info["stop_event"].is_set():
+                        sock_info["sock"].send(keep_alive_payload)
+                        logger.debug(f"Sent keep-alive to {ip}")
+                    else:
+                        logger.info(f"Keep-alive for {ip} stopping: socket not found, closed, or stop event set.")
+                        break # If socket is gone or stop event is set, exit loop
+            except Exception as e:
+                logger.error(f"Error sending keep-alive to {ip}: {e}. Disconnecting.")
+                # If send fails, attempt to disconnect and clean up
+                self.loop.call_soon_threadsafe(
+                    lambda ip_arg=ip: asyncio.create_task(self.disconnect(ip_arg)), 
+                    ip 
+                )
+                break
+            await asyncio.sleep(1) # Send once per second
+
+    def _response_listener_thread(self, ip: str, sock: socket.socket, stop_event: threading.Event):
+        """
+        同步线程：监听UDP响应，并将回调调度到主事件循环。
+        """
+        logger.info(f"Starting UDP response listener thread for {ip} on socket {sock.fileno()}")
+        
+        try:
+            while not stop_event.is_set():
+                try:
+                    data, sender_addr = sock.recvfrom(4096)
+                    
+                    if sender_addr[0] == ip: # Ensure we only process responses from the target IP
+                        header_payload, actual_data = decode_request(data)
+                        if header_payload and self.on_command_response:
+                            # Schedule the async callback to run in the main event loop
+                            asyncio.run_coroutine_threadsafe(
+                                self.on_command_response(ip, header_payload, actual_data), 
+                                self.loop
+                            )
+                        else:
+                            logger.debug(f"Failed to decode response from {ip} or no callback. Raw: {data.hex()}")
+                    else:
+                        logger.debug(f"Ignored UDP packet from {sender_addr[0]} (not target IP {ip}). Raw: {data.hex()}")
+                except socket.timeout:
+                    pass # Timeout is expected for checking stop_event
+                except OSError as e: # Catch OSError specifically for closed socket
+                    if stop_event.is_set() and e.errno == 9: # Errno 9 is Bad file descriptor
+                        logger.info(f"UDP response listener for {ip} detected socket closed (Errno 9) due to stop event. Exiting.")
+                    else:
+                        logger.exception(f"Unexpected OSError in UDP response listener for {ip}.")
+                    break # Break the loop on socket errors
+                except Exception as e:
+                    logger.exception(f"Error in UDP response listener for {ip}.")
+                    # If listener thread fails unexpectedly, trigger disconnect
+                    self.loop.call_soon_threadsafe(
+                        lambda ip_arg=ip: asyncio.create_task(self.disconnect(ip_arg)),
+                        ip
+                    )
+                    break
+        finally:
+            logger.info(f"UDP response listener thread for {ip} stopping cleanly.")
+            # Important: Do NOT attempt to close the socket or cancel keep-alive from here.
+            # The disconnect method is responsible for those actions.
+            # This 'finally' block ensures a clean exit message.
+
+    def connect(self, ip: str, port: int = PROBE_TOOL_PORT) -> bool:
+        """
+        Creates a UDP "connection" context with a listener thread and keep-alive task for the device.
+        """
+        with self.lock:
+            if ip in self.connections and self.connections[ip].get("sock"):
+                logger.info(f"UDP 'connection' context for {ip} already exists and is active.")
+                return True
+
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(0.1) # Short timeout to make recvfrom interruptible
+
+                # UDP's connect() just sets the default target IP and port; it doesn't establish a TCP-like connection.
+                sock.connect((ip, port)) 
+                
+                stop_event = threading.Event()
+                listener_thread = threading.Thread(
+                    target=self._response_listener_thread, 
+                    args=(ip, sock, stop_event), 
+                    daemon=True
+                )
+                listener_thread.start()
+
+                # Create and start the asynchronous keep-alive task
+                keep_alive_task = self.loop.create_task(self._send_keep_alive(ip))
+                
+                self.connections[ip] = {
+                    "sock": sock,
+                    "listener_thread": listener_thread,
+                    "stop_event": stop_event,
+                    "keep_alive_task": keep_alive_task
+                }
+
+                logger.info(f"UDP 'connection' context created and listener/keep-alive started for {ip}:{port}")
+                
+                return True
+            except Exception as e:
+                logger.error(f"Failed to create UDP 'connection' context for {ip}:{port}: {e}")
+                # Clean up any partially created state
+                if ip in self.connections: 
+                    conn_info = self.connections.pop(ip)
+                    if conn_info.get("sock"):
+                        conn_info["sock"].close()
+                    if conn_info.get("keep_alive_task"):
+                        conn_info["keep_alive_task"].cancel()
+                    if conn_info.get("stop_event"):
+                        conn_info["stop_event"].set()
+                return False
+
+    async def disconnect(self, ip: str) -> bool:
+        """
+        Disconnects the UDP "connection" context for a device, stopping the listener thread and keep-alive task.
+        This is an asynchronous method because it needs to cancel an asyncio task.
+        """
+        with self.lock:
+            if ip not in self.connections:
+                logger.info(f"No UDP 'connection' context for {ip} to disconnect.")
+                return False
+            
+            # Remove the entry immediately to prevent other operations on it during cleanup
+            conn_info = self.connections.pop(ip) 
+            
+            # 1. Signal listener thread to stop (it will handle its own exit)
+            if conn_info.get("stop_event"):
+                conn_info["stop_event"].set()
+            
+            # 2. Close the socket to unblock the listener thread's recvfrom
+            if conn_info.get("sock"):
+                try:
+                    conn_info["sock"].close()
+                    logger.info(f"Closed UDP socket for {ip}.")
+                except Exception as e:
+                    logger.warning(f"Error closing UDP socket for {ip}: {e}")
+            
+            # 3. Cancel keep-alive task
+            if conn_info.get("keep_alive_task"):
+                conn_info["keep_alive_task"].cancel()
+                try:
+                    await conn_info["keep_alive_task"] # Wait for the task to be cancelled
+                    logger.debug(f"Keep-alive task for {ip} cancelled successfully.")
+                except asyncio.CancelledError:
+                    pass # Expected if it's already running and we cancelled it
+                except Exception as e:
+                    logger.warning(f"Error awaiting cancelled keep-alive task for {ip}: {e}")
+            
+            # Note: We don't explicitly join the listener thread here as it's daemonized
+            # and closing the socket should cause it to exit quickly.
+            # Its 'finally' block will simply log an exit message.
+
+            logger.info(f"UDP 'disconnected' context for {ip} cleaned up.")
+            return True
+
+    def send(self, ip: str, payload_bytes: bytes) -> bool:
+        """
+        Sends UDP data to the specified IP.
+        """
+        with self.lock:
+            sock_info = self.connections.get(ip)
+            if not sock_info or not sock_info.get("sock") or sock_info["stop_event"].is_set():
+                logger.warning(f"Cannot send, no active UDP 'connection' context for {ip} or stop event set.")
+                return False
+
+            try:
+                sock_info["sock"].send(payload_bytes)
+                logger.debug(f"Sent {len(payload_bytes)} bytes to {ip}:{PROBE_TOOL_PORT}")
+                return True
+            except Exception as e:
+                logger.error(f"Error sending UDP data to {ip}: {e}")
+                # If send fails, trigger disconnect cleanup
+                self.loop.call_soon_threadsafe(
+                    lambda ip_arg=ip: asyncio.create_task(self.disconnect(ip_arg)), 
+                    ip 
+                )
+                return False
