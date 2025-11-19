@@ -5,7 +5,7 @@ import threading
 import asyncio
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Set
 import websockets
 import traceback
 import logging
@@ -36,6 +36,12 @@ class ServerState:
         self.continuous_discovery_server: Optional[UdpDiscoveryServer] = None # For "Start Scanner" (continuous)
         self.active_timed_scanner: Optional[UdpDiscoveryServer] = None # For "Refresh Devices" (5-second scan)
         self.active_timed_scan_task: Optional[asyncio.Task] = None # To manage cancellation of timed scan
+
+        # New: Set to store IPs discovered during the *current* active scan window
+        # This will be used for cleanup after a timed scan or to track active devices for continuous scan.
+        self._active_scan_results: Set[str] = set() 
+        self._active_scan_results_lock = threading.Lock() # Lock for _active_scan_results
+
         self.ftp_server: Optional[ProbeFtpServer] = None # FTP server will be initialized and started externally
         
         self.log_ws = set()
@@ -43,6 +49,10 @@ class ServerState:
 
     def update_devices(self, found_ip: str, device_id: str):
         logger.debug(f"update_devices called. IP: {found_ip}, Raw ID: '{device_id}'")
+        
+        with self._active_scan_results_lock:
+            self._active_scan_results.add(found_ip) # Add to current scan results
+
         with self.devices_lock:
             display_device_id = device_id if device_id else f"Unnamed_Device_{found_ip.replace('.', '_')}"
             
@@ -167,6 +177,7 @@ class ServerState:
         Performs a device scan for a specified duration and then stops the temporary scanner.
         This runs in the main asyncio loop and is non-blocking.
         Only one timed scan can be active at a time. If a new one is started, the previous one is cancelled.
+        After the scan, it cleans up 'Available' devices not found in this scan.
         """
         logger.info(f"Initiating a timed device scan for {duration_seconds} seconds.")
 
@@ -183,6 +194,10 @@ class ServerState:
                 self.active_timed_scanner.join(timeout=0.5) # Give it a moment to clean up
             self.active_timed_scanner = None
             self.active_timed_scan_task = None
+        
+        # Clear previous active scan results to collect only current ones
+        with self._active_scan_results_lock:
+            self._active_scan_results.clear()
 
         temp_scanner = UdpDiscoveryServer(on_device_found=self.update_devices)
         temp_scanner.daemon = True 
@@ -200,7 +215,7 @@ class ServerState:
         except Exception as e:
             logger.error(f"Error during timed device scan: {e}")
         finally:
-            logger.info(f"Ensuring temporary device scanner is stopped.")
+            logger.info(f"Ensuring temporary device scanner is stopped and performing cleanup.")
             # Only stop if it's still the one we started (might have been replaced by a newer timed scan)
             if self.active_timed_scanner and self.active_timed_scanner == temp_scanner: 
                 self.active_timed_scanner.stop_server()
@@ -208,6 +223,26 @@ class ServerState:
                 self.active_timed_scanner = None
             if self.active_timed_scan_task == asyncio.current_task(): # Clear reference only if this was the task we started
                 self.active_timed_scan_task = None
+
+            # --- Backend Cleanup of 'Available' Devices ---
+            ips_to_remove = []
+            with self.devices_lock:
+                with self._active_scan_results_lock: # Also lock active scan results for consistent comparison
+                    for ip, info in self.devices.items():
+                        # Only remove 'Available' devices that were NOT found in this scan's results
+                        if info["status"] == "Available" and ip not in self._active_scan_results:
+                            ips_to_remove.append(ip)
+            
+                for ip in ips_to_remove:
+                    logger.info(f"Removing inactive 'Available' device from backend cache: {ip} - {self.devices[ip]['id']}")
+                    del self.devices[ip]
+                
+                if ips_to_remove: # If any devices were removed, push an updated snapshot
+                    asyncio.run_coroutine_threadsafe(self.push_devices_snapshot(), self.loop)
+                
+                # After cleanup, clear the active scan results for the next scan
+                self._active_scan_results.clear()
+
 
 class ApiHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, directory=None, state: ServerState = None, **kwargs):
@@ -494,9 +529,6 @@ if __name__ == "__main__":
             if main_loop_state_instance.active_timed_scan_task and not main_loop_state_instance.active_timed_scan_task.done():
                 main_loop_state_instance.active_timed_scan_task.cancel()
                 try:
-                    # Attempt to get the event loop to run the cancellation, but it might already be closed.
-                    # For a robust shutdown, this should ideally be handled within the main_startup_logic.
-                    # As a fallback in finally, we try to get a loop and run.
                     cleanup_loop = None
                     try:
                         cleanup_loop = asyncio.get_event_loop()

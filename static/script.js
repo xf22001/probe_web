@@ -85,7 +85,7 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('JS DEBUG: updateDeviceList called with devices:', devices);
         deviceList.innerHTML = ''; // Clear current list
         if (!devices || devices.length === 0) {
-            deviceList.innerHTML = '<li>No devices found. Start scanner and click "Refresh Devices"</li>';
+            deviceList.innerHTML = '<li>No devices found. Start scanner or click "Refresh Devices"</li>'; // Updated message
             console.log('JS DEBUG: No devices to populate list.');
             return;
         }
@@ -186,7 +186,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (message.type === 'devices') {
                 currentDevices = message.data;
                 console.log('JS DEBUG: currentDevices updated:', currentDevices);
-                updateDeviceList(currentDevices);
+                updateDeviceList(currentDevices); // This will clear and re-populate
                 updateDeviceSelect(currentDevices);
             } else if (message.type === 'info') { 
                 console.info('JS INFO: Device WS Info:', message.data);
@@ -236,6 +236,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Device Discovery Buttons
     startScannerButton.addEventListener('click', async () => {
         startScannerButton.disabled = true; 
+        // Clear frontend device lists immediately
+        deviceList.innerHTML = '<li>Scanning for devices (continuous)...</li>'; 
+        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>'; 
+        currentDevices = []; // Also clear the internal array
+
         try {
             const response = await fetch('/api/scanner/start', { method: 'POST' });
             const data = await response.json();
@@ -245,6 +250,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (error) {
             console.error('JS ERROR: Error starting continuous scanner:', error);
+            deviceList.innerHTML = '<li>Error starting scanner.</li>'; 
         } finally {
             updateScannerButtons(); 
         }
@@ -269,6 +275,11 @@ document.addEventListener('DOMContentLoaded', () => {
     scanButton.addEventListener('click', async () => {
         // scanButton is already disabled if continuous scanner is running, no need for another check here.
         scanButton.disabled = true; // Disable "Refresh Devices" temporarily while it's performing its scan
+        // Clear frontend device lists immediately
+        deviceList.innerHTML = '<li>Scanning for devices (5 seconds)...</li>'; 
+        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>'; 
+        currentDevices = []; // Also clear the internal array
+
         try {
             const response = await fetch('/api/scan', { method: 'POST' });
             const data = await response.json();
@@ -277,6 +288,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // The timed scan runs for 5 seconds, but frontend can re-enable immediately to allow re-triggering.
         } catch (error) {
             console.error('JS ERROR: Error initiating device list refresh:', error);
+            deviceList.innerHTML = '<li>Error initiating scan.</li>'; 
         } finally {
             // Re-enable only if the continuous scanner is NOT running
             scanButton.disabled = scannerIsRunning; 
