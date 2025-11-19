@@ -1,4 +1,4 @@
-# app.py
+# ./app.py
 import os
 import json
 import threading
@@ -33,7 +33,9 @@ class ServerState:
         self.connector = Connector(loop=self.loop, on_command_response=self.handle_command_response) 
         
         self.log_server: Optional[UdpLogServer] = None
-        self.discovery_server: Optional[UdpDiscoveryServer] = None 
+        self.continuous_discovery_server: Optional[UdpDiscoveryServer] = None # For "Start Scanner" (continuous)
+        self.active_timed_scanner: Optional[UdpDiscoveryServer] = None # For "Refresh Devices" (5-second scan)
+        self.active_timed_scan_task: Optional[asyncio.Task] = None # To manage cancellation of timed scan
         self.ftp_server: Optional[ProbeFtpServer] = None # FTP server will be initialized and started externally
         
         self.log_ws = set()
@@ -53,8 +55,7 @@ class ServerState:
                      self.devices[found_ip]["id"] = display_device_id
                      logger.info(f"Updated generic device ID for {found_ip} to: '{display_device_id}'")
                 elif existing["id"] != display_device_id and device_id:
-                    # 修正: found_pullid -> found_ip
-                    self.devices[found_ip]["id"] = display_device_id 
+                    self.devices[found_ip]["id"] = display_device_id
                     logger.info(f"Updated device ID for {found_ip} to: '{display_device_id}'")
 
         logger.debug(f"Devices dict after update_devices: {self.devices}")
@@ -161,6 +162,53 @@ class ServerState:
         except Exception:
             logger.exception("An unhandled exception occurred in ws_handler.")
 
+    async def _perform_timed_device_scan(self, duration_seconds: float):
+        """
+        Performs a device scan for a specified duration and then stops the temporary scanner.
+        This runs in the main asyncio loop and is non-blocking.
+        Only one timed scan can be active at a time. If a new one is started, the previous one is cancelled.
+        """
+        logger.info(f"Initiating a timed device scan for {duration_seconds} seconds.")
+
+        # Cancel any previous active timed scan
+        if self.active_timed_scan_task and not self.active_timed_scan_task.done():
+            logger.info("Cancelling previous active timed scan task.")
+            self.active_timed_scan_task.cancel()
+            try:
+                await self.active_timed_scan_task # Wait for it to finish cancelling
+            except asyncio.CancelledError:
+                pass # Expected
+            if self.active_timed_scanner:
+                self.active_timed_scanner.stop_server()
+                self.active_timed_scanner.join(timeout=0.5) # Give it a moment to clean up
+            self.active_timed_scanner = None
+            self.active_timed_scan_task = None
+
+        temp_scanner = UdpDiscoveryServer(on_device_found=self.update_devices)
+        temp_scanner.daemon = True 
+        self.active_timed_scanner = temp_scanner # Store reference to the current timed scanner
+
+        try:
+            self.active_timed_scanner.start_server() 
+            current_task = asyncio.current_task()
+            self.active_timed_scan_task = current_task # Store reference to this task
+
+            await asyncio.sleep(duration_seconds)
+            logger.info(f"Timed device scan completed after {duration_seconds} seconds.")
+        except asyncio.CancelledError:
+            logger.info(f"Timed scan task was cancelled.")
+        except Exception as e:
+            logger.error(f"Error during timed device scan: {e}")
+        finally:
+            logger.info(f"Ensuring temporary device scanner is stopped.")
+            # Only stop if it's still the one we started (might have been replaced by a newer timed scan)
+            if self.active_timed_scanner and self.active_timed_scanner == temp_scanner: 
+                self.active_timed_scanner.stop_server()
+                self.active_timed_scanner.join(timeout=0.5)
+                self.active_timed_scanner = None
+            if self.active_timed_scan_task == asyncio.current_task(): # Clear reference only if this was the task we started
+                self.active_timed_scan_task = None
+
 class ApiHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, directory=None, state: ServerState = None, **kwargs):
         self.server_state = state
@@ -202,7 +250,7 @@ class ApiHandler(SimpleHTTPRequestHandler):
             logger.debug(f"Served /api/devices with {len(snap)} devices.")
             return
         elif path == "/api/scanner_status":
-            status = "running" if self.server_state.discovery_server and self.server_state.discovery_server.running else "stopped"
+            status = "running" if self.server_state.continuous_discovery_server and self.server_state.continuous_discovery_server.is_alive() else "stopped"
             data = json.dumps({"status": "ok", "scanner_status": status}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -231,46 +279,44 @@ class ApiHandler(SimpleHTTPRequestHandler):
         body = self.rfile.read(length) if length > 0 else b""
         try:
             data = json.loads(body.decode("utf-8")) if body else {}
-        except json.JSONDecodeError: # 更具体的异常类型
-            data = {}
-            logger.warning(f"Failed to parse JSON body for {path}. Body: {body.decode('utf-8', errors='ignore')}")
         except Exception:
             data = {}
-            logger.warning(f"An unexpected error occurred parsing JSON body for {path}. Body: {body.decode('utf-8', errors='ignore')}")
+            logger.warning(f"Failed to parse JSON body for {path}. Body: {body.decode('utf-8', errors='ignore')}")
 
         try:
             if path == "/api/scanner/start":
-                if self.server_state.discovery_server and self.server_state.discovery_server.running:
+                if self.server_state.continuous_discovery_server and self.server_state.continuous_discovery_server.is_alive():
                     self._send_json(200, {"status": "scanner_already_running"})
-                    logger.info("Scanner start API called, but already running.")
+                    logger.info("Continuous scanner start API called, but already running.")
                     return
-                self.server_state.discovery_server = UdpDiscoveryServer(on_device_found=self.server_state.update_devices)
-                self.server_state.discovery_server.start()
+                # Create a new instance for continuous running
+                self.server_state.continuous_discovery_server = UdpDiscoveryServer(on_device_found=self.server_state.update_devices)
+                self.server_state.continuous_discovery_server.daemon = True # Mark as daemon for automatic cleanup
+                self.server_state.continuous_discovery_server.start_server() # Use the new start_server method
                 self._send_json(200, {"status": "scanner_started"})
-                logger.info("Scanner API called, Discovery server started.")
+                logger.info("Continuous Discovery server started.")
                 return
             
             elif path == "/api/scanner/stop":
-                if not self.server_state.discovery_server or not self.server_state.discovery_server.running:
+                if not (self.server_state.continuous_discovery_server and self.server_state.continuous_discovery_server.is_alive()):
                     self._send_json(200, {"status": "scanner_not_running"})
-                    logger.info("Scanner stop API called, but not running.")
+                    logger.info("Continuous scanner stop API called, but not running.")
                     return
-                self.server_state.discovery_server.stop()
-                self.server_state.discovery_server.join(timeout=1.0)
-                self.server_state.discovery_server = None
+                self.server_state.continuous_discovery_server.stop_server() # Use the new stop_server method
+                self.server_state.continuous_discovery_server = None # Clear reference after stopping
                 self._send_json(200, {"status": "scanner_stopped"})
-                logger.info("Discovery server stopped.")
+                logger.info("Continuous Discovery server stopped.")
                 return
 
-            elif path == "/api/scan":
-                if not self.server_state.discovery_server or not self.server_state.discovery_server.running:
-                    logger.info("Scan API called, but scanner was not running. Starting it now.")
-                    self.server_state.discovery_server = UdpDiscoveryServer(on_device_found=self.server_state.update_devices)
-                    self.server_state.discovery_server.start()
-                    self._send_json(200, {"status": "scanner_started_and_scanned"})
-                else:
-                    self._send_json(200, {"status": "scanner_already_running_and_scanned"})
-                logger.info("Scan API called, ensured Discovery server is active.")
+            elif path == "/api/scan": # "Refresh Devices" - triggers a 5-second scan
+                # This initiates a *separate* 5-second scan, regardless of continuous scanner status.
+                # The _perform_timed_device_scan will handle cancelling any previous timed scan.
+                asyncio.run_coroutine_threadsafe(
+                    self.server_state._perform_timed_device_scan(5.0), 
+                    self.server_state.loop
+                )
+                self._send_json(200, {"status": "timed_scan_initiated"})
+                logger.info("Timed device scan (5s) initiated via /api/scan.")
                 return
 
             elif path == "/api/connect":
@@ -298,10 +344,8 @@ class ApiHandler(SimpleHTTPRequestHandler):
                     return
                 
                 try:
-                    # 在主事件循环中调度异步 disconnect 任务
-                    # 创建任务并在事件循环中运行，不会阻塞当前线程
-                    task = asyncio.run_coroutine_threadsafe(self.server_state.connector.disconnect(ip), self.server_state.loop)
-                    task.result(timeout=5.0) # 等待任务完成，有超时
+                    future = asyncio.run_coroutine_threadsafe(self.server_state.connector.disconnect(ip), self.server_state.loop)
+                    future.result(timeout=5.0)
                     self.server_state.set_device_status(ip, "Available")
                     self._send_json(200, {"status":"disconnected"})
                     logger.info(f"Disconnected from device {ip}.")
@@ -393,12 +437,24 @@ async def main_startup_logic(): # Renamed to clearly indicate this is the primar
         logger.error(f"Static directory missing: {static_dir}")
         return
 
-    # 启动 HTTP 服务器线程
-    http_thread = threading.Thread(target=run_http_server, args=(main_loop_state_instance, static_dir, HTTP_PORT), daemon=True)
-    http_thread.start()
+    t = threading.Thread(target=run_http_server, args=(main_loop_state_instance, static_dir, HTTP_PORT), daemon=True)
+    t.start()
 
     logger.info(f"WebSocket server starting on 0.0.0.0:{WS_PORT}")
-    ws_server = websockets.serve(main_loop_state_instance.ws_handler, "", WS_PORT)
+    start_server = websockets.serve(main_loop_state_instance.ws_handler, "", WS_PORT)
+
+    # === 自动启动 Log 服务器 ===
+    def on_receive_log_line(line):
+        asyncio.run_coroutine_threadsafe(main_loop_state_instance.broadcast_log(line), main_loop_state_instance.loop)
+    main_loop_state_instance.log_server = UdpLogServer(on_receive=on_receive_log_line)
+    main_loop_state_instance.log_server.start()
+    logger.info("Log Server automatically started in the background.")
+    # ==========================
+
+    # === 工具启动时, 自动进行一次5秒的设备刷新 (Timed Scan) ===
+    asyncio.create_task(main_loop_state_instance._perform_timed_device_scan(5.0))
+    logger.info("Initial 5-second device discovery initiated.")
+    # ======================================================
 
     # === 自动启动 FTP 服务器 ===
     main_loop_state_instance.ftp_server = ProbeFtpServer(host="0.0.0.0", port=2121, username="user", password="12345") # Create ONE FTP Server instance
@@ -406,27 +462,9 @@ async def main_startup_logic(): # Renamed to clearly indicate this is the primar
     logger.info("FTP Server automatically started in the background.")
     # ==========================
 
-    try:
-        async with ws_server:
-            logger.info(f"UDP Discovery Server is initially stopped as per requirement.")
-            await asyncio.Future() # This keeps the event loop running indefinitely
-    except asyncio.CancelledError:
-        logger.info("Main startup logic was cancelled.")
-    except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt caught in main_startup_logic, initiating graceful shutdown.")
-    finally:
-        # 在主事件循环仍然运行时进行异步清理
-        logger.info("Initiating async cleanup for Connector connections...")
-        if main_loop_state_instance and main_loop_state_instance.connector:
-            disconnect_tasks = [main_loop_state_instance.connector.disconnect(ip) 
-                                for ip in list(main_loop_state_instance.connector.connections.keys())]
-            if disconnect_tasks:
-                # 使用 asyncio.gather 来并行等待所有断开连接任务完成
-                # return_exceptions=True 确保即使某个任务失败，也不会中断其他任务
-                await asyncio.gather(*disconnect_tasks, return_exceptions=True)
-                logger.info("All active device connections cleanup completed.")
-            else:
-                logger.info("No active device connections to cleanup.")
+    async with start_server:
+        logger.info(f"All background services initialized. HTTP on {HTTP_PORT}, WS on {WS_PORT}. Awaiting shutdown signal.")
+        await asyncio.Future() # Keep the main loop running indefinitely
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -442,12 +480,38 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Shutting down due to KeyboardInterrupt...")
     finally:
-        # Cleanup logic for thread-based services (Discovery, Log, FTP)
-        logger.info("Initiating synchronous cleanup for thread-based services...")
-        if main_loop_state_instance and main_loop_state_instance.discovery_server:
-            main_loop_state_instance.discovery_server.stop()
-            main_loop_state_instance.discovery_server.join(timeout=1.0)
-            logger.info("Discovery server stopped during shutdown.")
+        # Cleanup: Stop the continuous discovery server if it's active
+        if main_loop_state_instance and main_loop_state_instance.continuous_discovery_server:
+            logger.info("Stopping continuous discovery server during shutdown.")
+            main_loop_state_instance.continuous_discovery_server.stop_server()
+            # As it's a daemon thread and main process is exiting, explicit join might not be strictly needed,
+            # but stop_server does attempt a join for graceful exit.
+        
+        # Cleanup: Stop the active timed scanner if it's running
+        if main_loop_state_instance and main_loop_state_instance.active_timed_scanner:
+            logger.info("Stopping active timed scanner during shutdown.")
+            main_loop_state_instance.active_timed_scanner.stop_server()
+            if main_loop_state_instance.active_timed_scan_task and not main_loop_state_instance.active_timed_scan_task.done():
+                main_loop_state_instance.active_timed_scan_task.cancel()
+                try:
+                    # Attempt to get the event loop to run the cancellation, but it might already be closed.
+                    # For a robust shutdown, this should ideally be handled within the main_startup_logic.
+                    # As a fallback in finally, we try to get a loop and run.
+                    cleanup_loop = None
+                    try:
+                        cleanup_loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        cleanup_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(cleanup_loop) # Set for this thread only if new
+
+                    if cleanup_loop and not cleanup_loop.is_closed():
+                        cleanup_loop.run_until_complete(main_loop_state_instance.active_timed_scan_task)
+                except (asyncio.CancelledError, RuntimeError): # RuntimeError if loop already closed/not running
+                    pass
+                except Exception as e:
+                    logger.warning(f"Error cancelling active_timed_scan_task during shutdown: {e}")
+            
+        # Cleanup logic remains the same for other services, operating on the single main_loop_state_instance
         if main_loop_state_instance and main_loop_state_instance.log_server:
             main_loop_state_instance.log_server.stop()
             main_loop_state_instance.log_server.join(timeout=1.0)
@@ -455,11 +519,39 @@ if __name__ == "__main__":
         # === 确保 FTP 服务器在关闭时停止 ===
         if main_loop_state_instance and main_loop_state_instance.ftp_server:
             logger.info("Attempting to stop FTP server during shutdown.")
-            # 检查 stop 方法是否存在且可调用，以增加健壮性
             if hasattr(main_loop_state_instance.ftp_server, 'stop') and callable(main_loop_state_instance.ftp_server.stop):
                 main_loop_state_instance.ftp_server.stop() 
                 main_loop_state_instance.ftp_server.join(timeout=3.0) 
                 logger.info("FTP server stopped during shutdown.")
             else:
                 logger.warning(f"FTP server object during shutdown lacks callable 'stop' method. Type: {type(main_loop_state_instance.ftp_server)}")
-        logger.info("Probe web service shutdown complete.")
+        # ===================================
+        if main_loop_state_instance and main_loop_state_instance.connector:
+            current_loop = None
+            try:
+                current_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                logger.warning("No running event loop found for final connector cleanup. Creating a new one.")
+                current_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(current_loop) # Set it for this thread
+
+            disconnect_tasks = []
+            for ip in list(main_loop_state_instance.connector.connections.keys()): 
+                logger.info(f"Scheduling disconnect for {ip} during shutdown.")
+                try:
+                    disconnect_tasks.append(main_loop_state_instance.connector.disconnect(ip))
+                except Exception as e:
+                    logger.warning(f"Could not schedule disconnect coroutine for {ip} during shutdown: {e}")
+            
+            if disconnect_tasks and current_loop:
+                async def run_disconnects():
+                    await asyncio.gather(*disconnect_tasks, return_exceptions=True)
+                
+                try:
+                    current_loop.run_until_complete(run_disconnects())
+                except Exception as e:
+                    logger.warning(f"Error during final connector disconnects: {e}")
+                finally:
+                    if not current_loop.is_closed():
+                        current_loop.close()
+            logger.info("All active device connections cleanup initiated during shutdown.")
