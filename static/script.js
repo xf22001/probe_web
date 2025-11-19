@@ -37,6 +37,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentDevices = []; // To store the latest device snapshot
     let scannerIsRunning = false; // To track the state of the *continuous* scanner (started/stopped)
     let logServerIsRunning = false; // To track the state of the log server (started/stopped)
+    
+    // 移除了 logBuffer 变量，因为现在日志直接在DOM中按顺序追加
 
 
     // === UI 更新函数 ===
@@ -218,7 +220,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 logLine.className = 'command-response'; 
             }
             logLine.textContent = message.data;
-            logOutput.prepend(logLine); // prepend: Newest logs at the top
+            
+            // --- Improved Auto-scroll Logic ---
+            // Check if user is scrolled to bottom BEFORE appending new content
+            const scrollTolerance = 5; // Pixels from bottom to consider "at bottom"
+            const isScrolledToBottom = (logOutput.scrollHeight - logOutput.clientHeight) <= (logOutput.scrollTop + scrollTolerance);
+
+            logOutput.appendChild(logLine); // Append new log to the bottom
+
+            // If user was at the bottom, scroll to the new bottom
+            if (isScrolledToBottom) {
+                logOutput.scrollTop = logOutput.scrollHeight;
+            }
+            // --- End Improved Auto-scroll Logic ---
         }
     };
 
@@ -415,9 +429,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     // === Initial Setup on Page Load ===
-    // These functions now reflect the auto-start behavior on the backend.
-    // The UI will fetch the actual state from the backend via API calls (fetchScannerStatus, fetchLogServerStatus)
-    // and WebSockets will keep the device list updated.
     updateDeviceControlButtons(); 
     fetchScannerStatus(); 
     fetchLogServerStatus(); 

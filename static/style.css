@@ -1,26 +1,9 @@
 /* static/style.css */
-
-/* CSS Variables for theming */
-:root {
-    --primary-color: #007bff;
-    --primary-hover-color: #0056b3;
-    --text-color: #333;
-    --background-color: #f4f4f4;
-    --card-background: #fff;
-    --border-color: #eee;
-    --log-background: #333;
-    --log-text-color: #0f0;
-    --log-command-response-color: #ffd700;
-    --spacing-xs: 5px;
-    --spacing-sm: 10px;
-    --spacing-md: 20px;
-}
-
 body {
     font-family: Arial, sans-serif;
     margin: 0; /* 移除body默认margin */
-    background-color: var(--background-color);
-    color: var(--text-color);
+    background-color: #f4f4f4;
+    color: #333;
     display: flex; /* 让body成为flex容器，用于居中主布局 */
     min-height: 100vh; /* 确保body至少占据整个视口高度 */
 }
@@ -29,23 +12,24 @@ body {
     display: flex;
     flex-direction: column; /* 垂直堆叠 header, content-area, footer */
     width: 100%; /* 占据父容器（body）的全部宽度 */
+    /* max-width: 1200px; /* 已移除，让它尽可能宽 */
     height: calc(100vh - 40px); /* 占据视口高度减去上下margin，实现固定高度 */
-    margin: var(--spacing-md) auto; /* 上下20px, 左右自动，实现水平居中 */
-    background-color: var(--card-background);
+    margin: 20px auto; /* 上下20px, 左右自动，实现水平居中 */
+    background-color: #fff;
     border-radius: 8px;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
     overflow: hidden; /* 确保圆角和子元素不溢出 */
 }
 
 header {
-    padding: var(--spacing-sm) var(--spacing-md);
-    border-bottom: 1px solid var(--border-color);
+    padding: 10px 20px;
+    border-bottom: 1px solid #eee;
     flex-shrink: 0; /* 不允许header收缩 */
 }
 
 header h1 {
     margin: 0;
-    color: var(--primary-hover-color);
+    color: #0056b3;
 }
 
 .content-area {
@@ -56,18 +40,18 @@ header h1 {
 
 .side-panel {
     flex: 0 0 300px; /* 固定侧边栏宽度为300px */
-    padding: var(--spacing-md);
-    border-right: 1px solid var(--border-color);
+    padding: 20px;
+    border-right: 1px solid #eee;
     display: flex;
     flex-direction: column; /* 侧边栏内部内容垂直堆叠 */
-    gap: var(--spacing-md); /* 侧边栏内部section的间距 */
-    overflow-y: auto; /* 侧边栏内容过多时可滚动 */
+    gap: 20px; /* 侧边栏内部section的间距 */
+    overflow-y: auto;
     flex-shrink: 0; /* 不允许侧边栏收缩 */
 }
 
 .center-content {
     flex-grow: 1; /* 中心内容占据剩余的所有水平空间 */
-    padding: var(--spacing-md);
+    padding: 20px;
     display: flex;
     flex-direction: column; /* 中心内容内部垂直堆叠 */
     overflow: hidden; /* 确保日志区内部滚动不会导致center-content溢出 */
@@ -84,43 +68,44 @@ header h1 {
     display: flex;
     justify-content: space-between; /* 标题和按钮组左右对齐 */
     align-items: center; /* 垂直居中对齐 */
-    margin-bottom: var(--spacing-sm); /* 与日志区域的间距 */
+    margin-bottom: 10px; /* 与日志区域的间距 */
     flex-shrink: 0; /* 不允许收缩 */
 }
 
-.log-buttons-group {
+.log-buttons-group { 
     display: flex;
-    gap: var(--spacing-xs); /* 按钮之间的间距 */
+    gap: 5px; /* 按钮之间的间距 */
     align-items: center; /* 垂直居中对齐 */
 }
 
 .log-area {
     flex-grow: 1; /* 实际的日志输出框占据日志部分的所有可用垂直空间 */
     border: 1px solid #ccc;
-    background-color: var(--log-background);
-    color: var(--log-text-color);
-    padding: var(--spacing-sm);
+    background-color: #333;
+    color: #0f0;
+    padding: 10px;
     min-height: 100px; /* 最小高度，保证可滚动 */
     overflow-y: scroll; /* 确保内容溢出时有滚动条 */
     font-family: monospace;
     white-space: pre-wrap;
     word-break: break-all;
     flex-shrink: 1; /* 允许日志区域根据需要收缩 */
-    display: flex; /* 确保内部内容在滚动时表现良好 */
-    flex-direction: column-reverse; /* 新日志在顶部，滚动条默认在底部 */
+    /* Removed flex-direction: column-reverse; */ 
+    display: flex; /* Keep flex display for consistent behavior */
+    flex-direction: column; /* New logs will appear at the bottom */
 }
 
 
 .bottom-command-panel {
     flex-shrink: 0; /* 不允许底部命令面板收缩 */
-    padding: var(--spacing-sm) var(--spacing-md);
-    border-top: 1px solid var(--border-color);
+    padding: 10px 20px;
+    border-top: 1px solid #eee;
 }
 
 .command-section {
     display: flex; /* 使输入框和按钮并排 */
     align-items: center; /* 垂直居中对齐 */
-    gap: var(--spacing-sm); /* 输入框和按钮之间的间距 */
+    gap: 10px; /* 输入框和按钮之间的间距 */
 }
 
 .command-section h3 {
@@ -149,17 +134,17 @@ header h1 {
 }
 
 /* 按钮和输入框的通用样式 */
-button, input[type="text"], select {
+button, input[type="text"], select { /* 移除了 input[type="number"], textarea */
     padding: 8px 12px;
-    margin: var(--spacing-xs) 0;
+    margin: 5px 0; 
     border: 1px solid #ccc;
     border-radius: 4px;
     font-size: 1em;
-    box-sizing: border-box;
+    box-sizing: border-box; 
 }
 
 button {
-    background-color: var(--primary-color);
+    background-color: #007bff;
     color: white;
     cursor: pointer;
     border: none;
@@ -167,7 +152,7 @@ button {
 }
 
 button:hover:not(:disabled) {
-    background-color: var(--primary-hover-color);
+    background-color: #0056b3;
 }
 
 button:disabled {
@@ -188,15 +173,15 @@ input[type="text"], select {
 #deviceList {
     list-style: none;
     padding: 0;
-    border: 1px solid var(--border-color);
+    border: 1px solid #eee;
     max-height: 200px; /* 限制设备列表高度，使其可滚动 */
     overflow-y: auto;
-    margin-top: var(--spacing-xs);
+    margin-top: 5px;
 }
 
 #deviceList li {
-    padding: var(--spacing-sm);
-    border-bottom: 1px solid var(--border-color);
+    padding: 10px;
+    border-bottom: 1px solid #eee;
     background-color: #f9f9f9;
 }
 
@@ -206,19 +191,6 @@ input[type="text"], select {
 
 /* 命令响应的样式 */
 .command-response {
-    color: var(--log-command-response-color);
+    color: #ffd700;
     font-weight: bold;
-}
-
-/* Screen Reader Only class for accessibility */
-.sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border-width: 0;
 }
