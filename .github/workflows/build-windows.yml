@@ -2,12 +2,12 @@
 name: Build Windows Executable
 
 on:
-  push:
-    branches:
-      - main # 或者 'master'，取决于您的主分支名称
-  pull_request:
-    branches:
-      - main # 或者 'master'
+  # push:
+  #   branches:
+  #     - main # 或者 'master'，取决于您的主分支名称
+  # pull_request:
+  #   branches:
+  #     - main # 或者 'master'
   workflow_dispatch: # 允许手动触发工作流
 
 jobs:
