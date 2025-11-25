@@ -12,7 +12,6 @@ body {
     display: flex;
     flex-direction: column; /* 垂直堆叠 header, content-area, footer */
     width: 100%; /* 占据父容器（body）的全部宽度 */
-    /* max-width: 1200px; /* 已移除，让它尽可能宽 */
     height: calc(100vh - 40px); /* 占据视口高度减去上下margin，实现固定高度 */
     margin: 20px auto; /* 上下20px, 左右自动，实现水平居中 */
     background-color: #fff;
@@ -90,8 +89,7 @@ header h1 {
     white-space: pre-wrap;
     word-break: break-all;
     flex-shrink: 1; /* 允许日志区域根据需要收缩 */
-    /* Removed flex-direction: column-reverse; */ 
-    display: flex; /* Keep flex display for consistent behavior */
+    display: flex; 
     flex-direction: column; /* New logs will appear at the bottom */
 }
 
@@ -134,7 +132,7 @@ header h1 {
 }
 
 /* 按钮和输入框的通用样式 */
-button, input[type="text"], select { /* 移除了 input[type="number"], textarea */
+button, input[type="text"], select { 
     padding: 8px 12px;
     margin: 5px 0; 
     border: 1px solid #ccc;
@@ -193,4 +191,14 @@ input[type="text"], select {
 .command-response {
     color: #ffd700;
     font-weight: bold;
+}
+
+/* 新增: 信息文本样式 */
+.info-text {
+    font-size: 0.9em;
+    color: #666;
+    margin-top: 5px;
+    margin-bottom: 0;
+    min-height: 1.2em; /* 保持占位，避免布局跳动 */
+    word-break: break-all;
 }

@@ -4,7 +4,7 @@ import threading
 import time
 from typing import Dict, Any, Callable, Optional
 import logging
-import asyncio # 新增导入 for asyncio tasks
+import asyncio 
 
 from protocol import decode_request, encode_request
 
@@ -16,7 +16,7 @@ PROBE_TOOL_PORT = 6001 # 客户端监听命令的端口
 class Connector:
     def __init__(self, loop: asyncio.AbstractEventLoop, on_command_response: Optional[Callable[[str, dict, bytes], None]] = None):
         self.loop = loop # 存储事件循环
-        # connections: Dict[ip, {"sock": socket_obj, "listener_thread": thread_obj, "stop_event": threading.Event, "keep_alive_task": asyncio.Task}]
+        # connections: Dict[ip, {"sock": socket_obj, "listener_thread": thread_obj, "stop_event": threading.Event, "keep_alive_task": asyncio.Task, "local_ip": str}]
         self.connections: Dict[str, Dict[str, Any]] = {}
         self.on_command_response = on_command_response
         self.lock = threading.Lock()
@@ -115,8 +115,13 @@ class Connector:
                 sock.settimeout(0.1) # Short timeout to make recvfrom interruptible
 
                 # UDP's connect() just sets the default target IP and port; it doesn't establish a TCP-like connection.
+                # However, it allows us to use getsockname() to find out which local interface is being used.
                 sock.connect((ip, port)) 
                 
+                # Capture the local IP address used for this connection
+                local_ip = sock.getsockname()[0]
+                logger.info(f"Socket for target {ip} bound to local IP: {local_ip}")
+
                 stop_event = threading.Event()
                 listener_thread = threading.Thread(
                     target=self._response_listener_thread, 
@@ -132,7 +137,8 @@ class Connector:
                     "sock": sock,
                     "listener_thread": listener_thread,
                     "stop_event": stop_event,
-                    "keep_alive_task": keep_alive_task
+                    "keep_alive_task": keep_alive_task,
+                    "local_ip": local_ip 
                 }
 
                 logger.info(f"UDP 'connection' context created and listener/keep-alive started for {ip}:{port}")
@@ -146,27 +152,32 @@ class Connector:
                 # Ensure keep-alive task is cancelled if it was created before the error
                 if 'keep_alive_task' in locals() and keep_alive_task and not keep_alive_task.done():
                     keep_alive_task.cancel()
-                    # No need to await here, as we are in a sync context. Task will eventually be cleaned up.
                 return False
+
+    def get_local_ip(self, ip: str) -> Optional[str]:
+        """Returns the local IP address being used to communicate with the target IP."""
+        with self.lock:
+            if ip in self.connections:
+                return self.connections[ip].get("local_ip")
+            return None
 
     async def disconnect(self, ip: str) -> bool:
         """
         Disconnects the UDP "connection" context for a device, stopping the listener thread and keep-alive task.
-        This is an asynchronous method because it needs to cancel an asyncio task.
         """
         with self.lock:
             if ip not in self.connections:
                 logger.info(f"No UDP 'connection' context for {ip} to disconnect.")
                 return False
             
-            # Remove the entry immediately to prevent other operations on it during cleanup
+            # Remove the entry immediately
             conn_info = self.connections.pop(ip) 
             
-            # 1. Signal listener thread to stop (it will handle its own exit)
+            # 1. Signal listener thread to stop
             if conn_info.get("stop_event"):
                 conn_info["stop_event"].set()
             
-            # 2. Close the socket to unblock the listener thread's recvfrom
+            # 2. Close the socket
             if conn_info.get("sock"):
                 try:
                     conn_info["sock"].close()
@@ -178,17 +189,13 @@ class Connector:
             if conn_info.get("keep_alive_task"):
                 conn_info["keep_alive_task"].cancel()
                 try:
-                    await conn_info["keep_alive_task"] # Wait for the task to be cancelled (handles CancelledError internally)
+                    await conn_info["keep_alive_task"] 
                     logger.debug(f"Keep-alive task for {ip} cancelled successfully.")
                 except asyncio.CancelledError:
-                    pass # Expected if it's already running and we cancelled it
+                    pass 
                 except Exception as e:
                     logger.warning(f"Error awaiting cancelled keep-alive task for {ip}: {e}")
             
-            # Note: We don't explicitly join the listener thread here as it's daemonized
-            # and closing the socket should cause it to exit quickly.
-            # Its 'finally' block will simply log an exit message.
-
             logger.info(f"UDP 'disconnected' context for {ip} cleaned up.")
             return True
 
@@ -196,7 +203,7 @@ class Connector:
         """
         Sends UDP data to the specified IP.
         """
-        with self.lock: # Ensure access to self.connections is thread-safe
+        with self.lock: 
             sock_info = self.connections.get(ip)
             if not sock_info or not sock_info.get("sock") or sock_info["stop_event"].is_set():
                 logger.warning(f"Cannot send, no active UDP 'connection' context for {ip} or stop event set.")
@@ -208,7 +215,6 @@ class Connector:
                 return True
             except Exception as e:
                 logger.error(f"Error sending UDP data to {ip}: {e}")
-                # If send fails, trigger disconnect cleanup
                 self.loop.call_soon_threadsafe(
                     lambda ip_arg=ip: asyncio.create_task(self.disconnect(ip_arg)), 
                     ip 

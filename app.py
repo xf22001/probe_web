@@ -13,10 +13,9 @@ import logging
 # 导入自定义模块
 from scanner import UdpDiscoveryServer, BROADCAST_PORT
 from connector import Connector, PROBE_TOOL_PORT
-# 修正：显式导入 base64_to_bytes
 from protocol import encode_request, text_to_request_bytes, base64_to_bytes, decode_request 
 from logger_server import UdpLogServer, LOG_TOOL_PORT
-from ftp_server import ProbeFtpServer # 导入 FTP 服务器类
+from ftp_server import ProbeFtpServer 
 
 # HTTP 和 WebSocket 端口保持不变
 HTTP_PORT = 8000
@@ -28,21 +27,20 @@ class ServerState:
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
         self.devices_lock = threading.Lock()
-        self.devices: Dict[str, Dict[str, Any]] = {}  # ip -> {id:, status:}
+        # devices: ip -> {id: str, status: str, connected_via: Optional[str]}
+        self.devices: Dict[str, Dict[str, Any]] = {}  
         
         self.connector = Connector(loop=self.loop, on_command_response=self.handle_command_response) 
         
         self.log_server: Optional[UdpLogServer] = None
-        self.continuous_discovery_server: Optional[UdpDiscoveryServer] = None # For "Start Scanner" (continuous)
-        self.active_timed_scanner: Optional[UdpDiscoveryServer] = None # For "Refresh Devices" (5-second scan)
-        self.active_timed_scan_task: Optional[asyncio.Task] = None # To manage cancellation of timed scan
+        self.continuous_discovery_server: Optional[UdpDiscoveryServer] = None 
+        self.active_timed_scanner: Optional[UdpDiscoveryServer] = None 
+        self.active_timed_scan_task: Optional[asyncio.Task] = None 
 
-        # New: Set to store IPs discovered during the *current* active scan window
-        # This will be used for cleanup after a timed scan or to track active devices for continuous scan.
         self._active_scan_results: Set[str] = set() 
-        self._active_scan_results_lock = threading.Lock() # Lock for _active_scan_results
+        self._active_scan_results_lock = threading.Lock() 
 
-        self.ftp_server: Optional[ProbeFtpServer] = None # FTP server will be initialized and started externally
+        self.ftp_server: Optional[ProbeFtpServer] = None 
         
         self.log_ws = set()
         self.dev_ws = set()
@@ -51,14 +49,15 @@ class ServerState:
         logger.debug(f"update_devices called. IP: {found_ip}, Raw ID: '{device_id}'")
         
         with self._active_scan_results_lock:
-            self._active_scan_results.add(found_ip) # Add to current scan results
+            self._active_scan_results.add(found_ip) 
 
         with self.devices_lock:
             display_device_id = device_id if device_id else f"Unnamed_Device_{found_ip.replace('.', '_')}"
             
             existing = self.devices.get(found_ip)
             if not existing:
-                self.devices[found_ip] = {"id": display_device_id, "status": "Available"}
+                # 默认 connected_via 为 None
+                self.devices[found_ip] = {"id": display_device_id, "status": "Available", "connected_via": None}
                 logger.info(f"Added new device: {found_ip} -> {self.devices[found_ip]}")
             else:
                 if existing["id"].startswith("Unnamed_Device_") and device_id and existing["id"] != display_device_id:
@@ -71,20 +70,30 @@ class ServerState:
         logger.debug(f"Devices dict after update_devices: {self.devices}")
         asyncio.run_coroutine_threadsafe(self.push_devices_snapshot(), self.loop)
 
-    def set_device_status(self, ip: str, status: str):
-        logger.debug(f"set_device_status called for IP: {ip}, Status: {status}")
+    def set_device_status(self, ip: str, status: str, local_ip: Optional[str] = None):
+        logger.debug(f"set_device_status called for IP: {ip}, Status: {status}, LocalIP: {local_ip}")
         with self.devices_lock:
             if ip in self.devices:
                 self.devices[ip]["status"] = status
+                self.devices[ip]["connected_via"] = local_ip # 更新连接源IP
                 logger.info(f"Updated status for {ip}: {self.devices[ip]}")
             else:
-                self.devices[ip] = {"id": f"Unnamed_Device_{ip.replace('.', '_')}", "status": status} 
+                self.devices[ip] = {
+                    "id": f"Unnamed_Device_{ip.replace('.', '_')}", 
+                    "status": status, 
+                    "connected_via": local_ip
+                } 
                 logger.info(f"Added device with status '{status}', as it was not in list: {ip} -> {self.devices[ip]}")
         asyncio.run_coroutine_threadsafe(self.push_devices_snapshot(), self.loop)
 
     async def push_devices_snapshot(self):
         with self.devices_lock:
-            snap = [{"ip": ip, "id": info["id"], "status": info["status"]} for ip, info in self.devices.items()]
+            snap = [{
+                "ip": ip, 
+                "id": info["id"], 
+                "status": info["status"],
+                "connected_via": info.get("connected_via")
+            } for ip, info in self.devices.items()]
         
         logger.debug(f"push_devices_snapshot preparing to send: {snap}")
         msg = json.dumps({"type": "devices", "data": snap})
@@ -141,7 +150,7 @@ class ServerState:
                 self.log_ws.add(websocket)
                 await websocket.send(json.dumps({"type":"info","data":"log_ws_ok"}))
                 try:
-                    async for _ in websocket: # Keep connection open
+                    async for _ in websocket: 
                         pass
                 except websockets.ConnectionClosed:
                     logger.info(f"Log WebSocket {websocket.remote_address} closed.")
@@ -152,10 +161,15 @@ class ServerState:
             elif typ == "devices":
                 self.dev_ws.add(websocket)
                 with self.devices_lock:
-                    snap = [{"ip": ip, "id": info["id"], "status": info["status"]} for ip, info in self.devices.items()]
+                    snap = [{
+                        "ip": ip, 
+                        "id": info["id"], 
+                        "status": info["status"],
+                        "connected_via": info.get("connected_via")
+                    } for ip, info in self.devices.items()]
                 await websocket.send(json.dumps({"type":"devices","data":snap}))
                 try:
-                    async for _ in websocket: # Keep connection open
+                    async for _ in websocket: 
                         pass
                 except websockets.ConnectionClosed:
                     logger.info(f"Device WebSocket {websocket.remote_address} closed.")
@@ -173,40 +187,32 @@ class ServerState:
             logger.exception("An unhandled exception occurred in ws_handler.")
 
     async def _perform_timed_device_scan(self, duration_seconds: float):
-        """
-        Performs a device scan for a specified duration and then stops the temporary scanner.
-        This runs in the main asyncio loop and is non-blocking.
-        Only one timed scan can be active at a time. If a new one is started, the previous one is cancelled.
-        After the scan, it cleans up 'Available' devices not found in this scan.
-        """
         logger.info(f"Initiating a timed device scan for {duration_seconds} seconds.")
 
-        # Cancel any previous active timed scan
         if self.active_timed_scan_task and not self.active_timed_scan_task.done():
             logger.info("Cancelling previous active timed scan task.")
             self.active_timed_scan_task.cancel()
             try:
-                await self.active_timed_scan_task # Wait for it to finish cancelling
+                await self.active_timed_scan_task 
             except asyncio.CancelledError:
-                pass # Expected
+                pass 
             if self.active_timed_scanner:
                 self.active_timed_scanner.stop_server()
-                self.active_timed_scanner.join(timeout=0.5) # Give it a moment to clean up
+                self.active_timed_scanner.join(timeout=0.5) 
             self.active_timed_scanner = None
             self.active_timed_scan_task = None
         
-        # Clear previous active scan results to collect only current ones
         with self._active_scan_results_lock:
             self._active_scan_results.clear()
 
         temp_scanner = UdpDiscoveryServer(on_device_found=self.update_devices)
         temp_scanner.daemon = True 
-        self.active_timed_scanner = temp_scanner # Store reference to the current timed scanner
+        self.active_timed_scanner = temp_scanner 
 
         try:
             self.active_timed_scanner.start_server() 
             current_task = asyncio.current_task()
-            self.active_timed_scan_task = current_task # Store reference to this task
+            self.active_timed_scan_task = current_task 
 
             await asyncio.sleep(duration_seconds)
             logger.info(f"Timed device scan completed after {duration_seconds} seconds.")
@@ -216,20 +222,17 @@ class ServerState:
             logger.error(f"Error during timed device scan: {e}")
         finally:
             logger.info(f"Ensuring temporary device scanner is stopped and performing cleanup.")
-            # Only stop if it's still the one we started (might have been replaced by a newer timed scan)
             if self.active_timed_scanner and self.active_timed_scanner == temp_scanner: 
                 self.active_timed_scanner.stop_server()
                 self.active_timed_scanner.join(timeout=0.5)
                 self.active_timed_scanner = None
-            if self.active_timed_scan_task == asyncio.current_task(): # Clear reference only if this was the task we started
+            if self.active_timed_scan_task == asyncio.current_task(): 
                 self.active_timed_scan_task = None
 
-            # --- Backend Cleanup of 'Available' Devices ---
             ips_to_remove = []
             with self.devices_lock:
-                with self._active_scan_results_lock: # Also lock active scan results for consistent comparison
+                with self._active_scan_results_lock: 
                     for ip, info in self.devices.items():
-                        # Only remove 'Available' devices that were NOT found in this scan's results
                         if info["status"] == "Available" and ip not in self._active_scan_results:
                             ips_to_remove.append(ip)
             
@@ -237,10 +240,9 @@ class ServerState:
                     logger.info(f"Removing inactive 'Available' device from backend cache: {ip} - {self.devices[ip]['id']}")
                     del self.devices[ip]
                 
-                if ips_to_remove: # If any devices were removed, push an updated snapshot
+                if ips_to_remove: 
                     asyncio.run_coroutine_threadsafe(self.push_devices_snapshot(), self.loop)
                 
-                # After cleanup, clear the active scan results for the next scan
                 self._active_scan_results.clear()
 
 
@@ -275,7 +277,12 @@ class ApiHandler(SimpleHTTPRequestHandler):
     def handle_api_get(self, path):
         if path == "/api/devices":
             with self.server_state.devices_lock:
-                snap = [{"ip": ip, "id": info["id"], "status": info["status"]} for ip, info in self.server_state.devices.items()]
+                snap = [{
+                    "ip": ip, 
+                    "id": info["id"], 
+                    "status": info["status"],
+                    "connected_via": info.get("connected_via")
+                } for ip, info in self.server_state.devices.items()]
             data = json.dumps({"status": "ok", "devices": snap}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -344,8 +351,6 @@ class ApiHandler(SimpleHTTPRequestHandler):
                 return
 
             elif path == "/api/scan": # "Refresh Devices" - triggers a 5-second scan
-                # This initiates a *separate* 5-second scan, regardless of continuous scanner status.
-                # The _perform_timed_device_scan will handle cancelling any previous timed scan.
                 asyncio.run_coroutine_threadsafe(
                     self.server_state._perform_timed_device_scan(5.0), 
                     self.server_state.loop
@@ -362,11 +367,12 @@ class ApiHandler(SimpleHTTPRequestHandler):
                     return
                 ok = self.server_state.connector.connect(ip) 
                 if ok:
-                    self.server_state.set_device_status(ip, "Connected")
-                    self._send_json(200, {"status":"connected"})
-                    logger.info(f"Connected to device {ip}.")
+                    local_ip = self.server_state.connector.get_local_ip(ip) # 获取本地IP
+                    self.server_state.set_device_status(ip, "Connected", local_ip=local_ip)
+                    self._send_json(200, {"status":"connected", "local_ip": local_ip})
+                    logger.info(f"Connected to device {ip} via {local_ip}.")
                 else:
-                    self.server_state.set_device_status(ip, "Available")
+                    self.server_state.set_device_status(ip, "Available", local_ip=None)
                     self._send_json(500, {"status":"error"})
                     logger.error(f"Failed to connect to device {ip}.")
                 return
@@ -381,7 +387,7 @@ class ApiHandler(SimpleHTTPRequestHandler):
                 try:
                     future = asyncio.run_coroutine_threadsafe(self.server_state.connector.disconnect(ip), self.server_state.loop)
                     future.result(timeout=5.0)
-                    self.server_state.set_device_status(ip, "Available")
+                    self.server_state.set_device_status(ip, "Available", local_ip=None) # 清除 local_ip
                     self._send_json(200, {"status":"disconnected"})
                     logger.info(f"Disconnected from device {ip}.")
                 except asyncio.TimeoutError:
@@ -462,11 +468,11 @@ def run_http_server(state: ServerState, static_dir: str, port: int = HTTP_PORT):
     logger.info(f"HTTP server serving static + API at http://0.0.0.0:{port}")
     server.serve_forever()
 
-async def main_startup_logic(): # Renamed to clearly indicate this is the primary startup
-    global main_loop_state_instance # Access the global instance
+async def main_startup_logic(): 
+    global main_loop_state_instance 
     
     loop = asyncio.get_event_loop()
-    main_loop_state_instance = ServerState(loop) # Create ONE ServerState instance
+    main_loop_state_instance = ServerState(loop) 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if not os.path.isdir(static_dir):
         logger.error(f"Static directory missing: {static_dir}")
@@ -484,22 +490,19 @@ async def main_startup_logic(): # Renamed to clearly indicate this is the primar
     main_loop_state_instance.log_server = UdpLogServer(on_receive=on_receive_log_line)
     main_loop_state_instance.log_server.start()
     logger.info("Log Server automatically started in the background.")
-    # ==========================
-
+    
     # === 工具启动时, 自动进行一次5秒的设备刷新 (Timed Scan) ===
     asyncio.create_task(main_loop_state_instance._perform_timed_device_scan(5.0))
     logger.info("Initial 5-second device discovery initiated.")
-    # ======================================================
 
     # === 自动启动 FTP 服务器 ===
-    main_loop_state_instance.ftp_server = ProbeFtpServer(host="0.0.0.0", port=2121, username="user", password="12345") # Create ONE FTP Server instance
-    main_loop_state_instance.ftp_server.start() # Start it ONE time
+    main_loop_state_instance.ftp_server = ProbeFtpServer(host="0.0.0.0", port=2121, username="user", password="12345") 
+    main_loop_state_instance.ftp_server.start() 
     logger.info("FTP Server automatically started in the background.")
-    # ==========================
 
     async with start_server:
         logger.info(f"All background services initialized. HTTP on {HTTP_PORT}, WS on {WS_PORT}. Awaiting shutdown signal.")
-        await asyncio.Future() # Keep the main loop running indefinitely
+        await asyncio.Future() 
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -509,20 +512,16 @@ if __name__ == "__main__":
     )
 
     logger.info("Starting probe web service...")
-    main_loop_state_instance: Optional[ServerState] = None # Declare global here
+    main_loop_state_instance: Optional[ServerState] = None 
     try:
-        asyncio.run(main_startup_logic()) # Call the single startup function
+        asyncio.run(main_startup_logic()) 
     except KeyboardInterrupt:
         logger.info("Shutting down due to KeyboardInterrupt...")
     finally:
-        # Cleanup: Stop the continuous discovery server if it's active
         if main_loop_state_instance and main_loop_state_instance.continuous_discovery_server:
             logger.info("Stopping continuous discovery server during shutdown.")
             main_loop_state_instance.continuous_discovery_server.stop_server()
-            # As it's a daemon thread and main process is exiting, explicit join might not be strictly needed,
-            # but stop_server does attempt a join for graceful exit.
         
-        # Cleanup: Stop the active timed scanner if it's running
         if main_loop_state_instance and main_loop_state_instance.active_timed_scanner:
             logger.info("Stopping active timed scanner during shutdown.")
             main_loop_state_instance.active_timed_scanner.stop_server()
@@ -534,21 +533,19 @@ if __name__ == "__main__":
                         cleanup_loop = asyncio.get_event_loop()
                     except RuntimeError:
                         cleanup_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(cleanup_loop) # Set for this thread only if new
+                        asyncio.set_event_loop(cleanup_loop) 
 
                     if cleanup_loop and not cleanup_loop.is_closed():
                         cleanup_loop.run_until_complete(main_loop_state_instance.active_timed_scan_task)
-                except (asyncio.CancelledError, RuntimeError): # RuntimeError if loop already closed/not running
+                except (asyncio.CancelledError, RuntimeError): 
                     pass
                 except Exception as e:
                     logger.warning(f"Error cancelling active_timed_scan_task during shutdown: {e}")
             
-        # Cleanup logic remains the same for other services, operating on the single main_loop_state_instance
         if main_loop_state_instance and main_loop_state_instance.log_server:
             main_loop_state_instance.log_server.stop()
             main_loop_state_instance.log_server.join(timeout=1.0)
             logger.info("Log server stopped during shutdown.")
-        # === 确保 FTP 服务器在关闭时停止 ===
         if main_loop_state_instance and main_loop_state_instance.ftp_server:
             logger.info("Attempting to stop FTP server during shutdown.")
             if hasattr(main_loop_state_instance.ftp_server, 'stop') and callable(main_loop_state_instance.ftp_server.stop):
@@ -557,7 +554,6 @@ if __name__ == "__main__":
                 logger.info("FTP server stopped during shutdown.")
             else:
                 logger.warning(f"FTP server object during shutdown lacks callable 'stop' method. Type: {type(main_loop_state_instance.ftp_server)}")
-        # ===================================
         if main_loop_state_instance and main_loop_state_instance.connector:
             current_loop = None
             try:
@@ -565,7 +561,7 @@ if __name__ == "__main__":
             except RuntimeError:
                 logger.warning("No running event loop found for final connector cleanup. Creating a new one.")
                 current_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(current_loop) # Set it for this thread
+                asyncio.set_event_loop(current_loop) 
 
             disconnect_tasks = []
             for ip in list(main_loop_state_instance.connector.connections.keys()): 

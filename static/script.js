@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const deviceSelect = document.getElementById('deviceSelect');
     const connectButton = document.getElementById('connectButton');
     const disconnectButton = document.getElementById('disconnectButton');
+    const connectionInfo = document.getElementById('connectionInfo'); // 新增
     
     // Send Command (Text) Section
     const commandInput = document.getElementById('commandInput');
@@ -25,27 +26,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // Log Stream Section
     const startLogButton = document.getElementById('startLogButton');
     const stopLogButton = document.getElementById('stopLogButton');
-    const clearLogButton = document.getElementById('clearLogButton'); // Clear Log button
+    const clearLogButton = document.getElementById('clearLogButton'); 
     const logOutput = document.getElementById('logOutput');
-
-    // FTP Server Control Section (已移除前端元素，所以无需获取其引用)
-    // const startFtpButton = document.getElementById('startFtpButton');
-    // const stopFtpButton = document.getElementById('stopFtpButton');
-    // const ftpStatusText = document.getElementById('ftpStatusText');
 
     // === 内部状态变量 ===
     let currentDevices = []; // To store the latest device snapshot
     let scannerIsRunning = false; // To track the state of the *continuous* scanner (started/stopped)
     let logServerIsRunning = false; // To track the state of the log server (started/stopped)
-    
-    // 移除了 logBuffer 变量，因为现在日志直接在DOM中按顺序追加
-
 
     // === UI 更新函数 ===
 
     /**
      * 更新设备控制按钮（Connect, Disconnect, Send Command）的状态
-     * 基于当前选中的设备及其连接状态。
+     * 以及下方的连接信息
      */
     function updateDeviceControlButtons() {
         console.log('JS DEBUG: updateDeviceControlButtons called.');
@@ -56,22 +49,33 @@ document.addEventListener('DOMContentLoaded', () => {
         connectButton.disabled = !selectedIp || isConnected;
         disconnectButton.disabled = !selectedIp || !isConnected;
         sendCommandButton.disabled = !isConnected; 
+
+        // 更新连接信息文本
+        if (isConnected && selectedDevice.connected_via) {
+            connectionInfo.textContent = `Via Local IP: ${selectedDevice.connected_via}`;
+            connectionInfo.style.color = '#006400'; // 深绿色
+        } else if (selectedDevice && selectedDevice.status === 'Available') {
+            connectionInfo.textContent = 'Device Available';
+            connectionInfo.style.color = '#666';
+        } else {
+            connectionInfo.textContent = ''; // 清空
+        }
+        
         console.log(`JS DEBUG: Buttons updated. Selected IP: ${selectedIp}, Connected: ${isConnected}`);
     }
 
     /**
-     * 更新扫描器控制按钮（Start/Stop Scanner, Refresh Devices）的状态。
+     * 更新扫描器控制按钮的状态。
      */
     function updateScannerButtons() {
         startScannerButton.disabled = scannerIsRunning;
         stopScannerButton.disabled = !scannerIsRunning;
-        // "Refresh Devices" button is disabled ONLY when the continuous scanner is running
         scanButton.disabled = scannerIsRunning; 
         console.log(`JS DEBUG: Scanner buttons updated. Continuous scanner running: ${scannerIsRunning}. Refresh Devices disabled: ${scanButton.disabled}`);
     }
 
     /**
-     * 更新日志服务器控制按钮（Start/Stop Log）的状态。
+     * 更新日志服务器控制按钮的状态。
      */
     function updateLogServerButtons() {
         startLogButton.disabled = logServerIsRunning;
@@ -81,13 +85,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /**
      * 根据设备列表数据更新前端的设备列表 `<ul>`。
-     * @param {Array<Object>} devices - 包含设备信息的数组。
      */
     function updateDeviceList(devices) {
         console.log('JS DEBUG: updateDeviceList called with devices:', devices);
         deviceList.innerHTML = ''; // Clear current list
         if (!devices || devices.length === 0) {
-            deviceList.innerHTML = '<li>No devices found. Start scanner or click "Refresh Devices"</li>'; // Updated message
+            deviceList.innerHTML = '<li>No devices found. Start scanner or click "Refresh Devices"</li>'; 
             console.log('JS DEBUG: No devices to populate list.');
             return;
         }
@@ -105,7 +108,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /**
      * 根据设备列表数据更新前端的设备选择下拉菜单 `<select>`。
-     * @param {Array<Object>} devices - 包含设备信息的数组。
      */
     function updateDeviceSelect(devices) {
         console.log('JS DEBUG: updateDeviceSelect called with devices:', devices);
@@ -145,7 +147,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log(`JS DEBUG: Fetched continuous scanner status: ${data.scanner_status}, scannerIsRunning: ${scannerIsRunning}`);
         } catch (error) {
             console.error('JS ERROR: Error fetching scanner status:', error);
-            scannerIsRunning = false; // Assume stopped if error
+            scannerIsRunning = false; 
             updateScannerButtons();
         }
     }
@@ -162,7 +164,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log(`JS DEBUG: Fetched log server status: ${data.log_server_status}, logServerIsRunning: ${logServerIsRunning}`);
         } catch (error) {
             console.error('JS ERROR: Error fetching log server status:', error);
-            logServerIsRunning = false; // Assume stopped if error
+            logServerIsRunning = false; 
             updateLogServerButtons();
         }
     }
@@ -170,12 +172,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // === WebSocket Handlers ===
 
-    // Device WebSocket: Handles real-time device list updates
     wsDevices.onopen = () => {
         console.log('JS DEBUG: Connected to device WebSocket. Sending registration...');
         wsDevices.send(JSON.stringify({ type: 'devices' })); 
         console.log('JS DEBUG: Sent device WebSocket registration message.');
-        // 页面加载后立即同步所有服务状态
         fetchScannerStatus(); 
         fetchLogServerStatus(); 
     };
@@ -188,7 +188,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (message.type === 'devices') {
                 currentDevices = message.data;
                 console.log('JS DEBUG: currentDevices updated:', currentDevices);
-                updateDeviceList(currentDevices); // This will clear and re-populate
+                updateDeviceList(currentDevices); 
                 updateDeviceSelect(currentDevices);
             } else if (message.type === 'info') { 
                 console.info('JS INFO: Device WS Info:', message.data);
@@ -206,10 +206,9 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('JS ERROR: Device WebSocket error:', error);
     };
 
-    // Log WebSocket: Handles real-time log stream
     wsLog.onopen = () => {
         console.log('JS DEBUG: Connected to log WebSocket');
-        wsLog.send(JSON.stringify({ type: 'log' })); // Register for log updates
+        wsLog.send(JSON.stringify({ type: 'log' })); 
     };
 
     wsLog.onmessage = (event) => {
@@ -221,18 +220,14 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             logLine.textContent = message.data;
             
-            // --- Improved Auto-scroll Logic ---
-            // Check if user is scrolled to bottom BEFORE appending new content
-            const scrollTolerance = 5; // Pixels from bottom to consider "at bottom"
+            const scrollTolerance = 5; 
             const isScrolledToBottom = (logOutput.scrollHeight - logOutput.clientHeight) <= (logOutput.scrollTop + scrollTolerance);
 
-            logOutput.appendChild(logLine); // Append new log to the bottom
+            logOutput.appendChild(logLine); 
 
-            // If user was at the bottom, scroll to the new bottom
             if (isScrolledToBottom) {
                 logOutput.scrollTop = logOutput.scrollHeight;
             }
-            // --- End Improved Auto-scroll Logic ---
         }
     };
 
@@ -247,13 +242,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // === Event Listeners ===
 
-    // Device Discovery Buttons
     startScannerButton.addEventListener('click', async () => {
         startScannerButton.disabled = true; 
-        // Clear frontend device lists immediately
         deviceList.innerHTML = '<li>Scanning for devices (continuous)...</li>'; 
         deviceSelect.innerHTML = '<option value="">-- Select a device --</option>'; 
-        currentDevices = []; // Also clear the internal array
+        currentDevices = []; 
 
         try {
             const response = await fetch('/api/scanner/start', { method: 'POST' });
@@ -287,29 +280,23 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     scanButton.addEventListener('click', async () => {
-        // scanButton is already disabled if continuous scanner is running, no need for another check here.
-        scanButton.disabled = true; // Disable "Refresh Devices" temporarily while it's performing its scan
-        // Clear frontend device lists immediately
+        scanButton.disabled = true; 
         deviceList.innerHTML = '<li>Scanning for devices (5 seconds)...</li>'; 
         deviceSelect.innerHTML = '<option value="">-- Select a device --</option>'; 
-        currentDevices = []; // Also clear the internal array
+        currentDevices = []; 
 
         try {
             const response = await fetch('/api/scan', { method: 'POST' });
             const data = await response.json();
             console.log('JS DEBUG: Device list refresh/timed scan initiated:', data);
-            // Re-enable the button after the backend has acknowledged the start.
-            // The timed scan runs for 5 seconds, but frontend can re-enable immediately to allow re-triggering.
         } catch (error) {
             console.error('JS ERROR: Error initiating device list refresh:', error);
             deviceList.innerHTML = '<li>Error initiating scan.</li>'; 
         } finally {
-            // Re-enable only if the continuous scanner is NOT running
             scanButton.disabled = scannerIsRunning; 
         }
     });
 
-    // Device Control Buttons
     deviceSelect.addEventListener('change', updateDeviceControlButtons);
 
     connectButton.addEventListener('click', async () => {
@@ -352,7 +339,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Send Command (Text) Button Logic
     sendCommandButton.addEventListener('click', async () => {
         const ip = deviceSelect.value;
         const text = commandInput.value;
@@ -388,7 +374,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Log Server Buttons
     startLogButton.addEventListener('click', async () => {
         startLogButton.disabled = true; 
         try {
@@ -421,12 +406,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // === Clear Log Button ===
     clearLogButton.addEventListener('click', () => {
         logOutput.innerHTML = ''; 
         console.log('JS DEBUG: Log output cleared.');
     });
-
 
     // === Initial Setup on Page Load ===
     updateDeviceControlButtons(); 
