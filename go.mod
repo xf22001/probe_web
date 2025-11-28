@@ -1,6 +1,6 @@
 module probe-tool
 
-go 1.22.0
+go 1.24.0
 
 require (
 	github.com/fclairamb/ftpserverlib v0.27.0
