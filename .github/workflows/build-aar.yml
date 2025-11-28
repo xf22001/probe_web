@@ -1,0 +1,72 @@
+name: Build Probetool AAR
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # 允许在 GitHub 网页上手动点击按钮触发
+
+jobs:
+  build-android-library:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Go 1.22
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22.0'
+
+    - name: Set up Java 17 (Required for Android SDK)
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install Android NDK
+      # Gomobile 依赖 NDK，安装一个稳定版本
+      run: sdkmanager --install "ndk;25.2.9519653"
+
+    - name: Install Gomobile Toolchain
+      run: |
+        go install golang.org/x/mobile/cmd/gomobile@latest
+        gomobile init
+
+    - name: Initialize Dependencies
+      run: |
+        # 确保 go.mod 存在并下载依赖
+        if [ ! -f go.mod ]; then
+          go mod init probetool
+        fi
+        go mod tidy
+
+    - name: Prepare Code for Binding
+      # === 关键步骤 ===
+      # Gomobile bind 不能编译 package main。
+      # 这里使用 sed 命令将包名改为 'probetool' 并移除 main 函数。
+      run: |
+        echo "Converting package main to package probetool..."
+        sed -i 's/package main/package probetool/' *.go
+        
+        # 删除 func main() {} 以避免冲突
+        # 假设 main 函数是空的或只有一行，如果很复杂建议手动注释
+        sed -i 's/func main() {}//' *.go || true
+
+    - name: Build AAR
+      run: |
+        # -target=android: 目标平台
+        # -o: 输出文件名 (必须与你在 build.gradle 中引用的名字一致)
+        # -ldflags="-s -w": 减小文件体积
+        gomobile bind -v -target=android -ldflags="-s -w" -o probetool.aar .
+
+    - name: Upload AAR Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: probetool-lib
+        path: |
+          probetool.aar
+          probetool-sources.jar
