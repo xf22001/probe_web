@@ -18,7 +18,6 @@ import (
 
 	ftpserver "github.com/fclairamb/ftpserverlib"
 	"github.com/gorilla/websocket"
-	"github.com/pkg/browser"
 	"github.com/spf13/afero"
 )
 
@@ -33,8 +32,12 @@ const (
 	ProbeToolPort = 6001
 	LogToolPort   = 6002
 	FTPPort       = 2121
-	LogDir        = "logs"
-	FTPRootDir    = "ftp_share"
+)
+
+var (
+	LogDir     = "logs"
+	FTPRootDir = "ftp_share"
+	httpServer *http.Server
 )
 
 // ==========================================
@@ -686,42 +689,52 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 // 7. Main Entry
 // ==========================================
 
-func main() {
+//export Start
+func Start(ftpDir, logDir, staticDir string) {
+	FTPRootDir = ftpDir
+	LogDir = logDir
+
 	StartLogServer()
 	StartFTPServer()
 	go PerformTimedScan()
 
-	http.Handle("/", http.FileServer(http.Dir("./static")))
-	http.HandleFunc("/api/scanner/start", handleScannerStart)
-	http.HandleFunc("/api/scanner/stop", handleScannerStop)
-	http.HandleFunc("/api/scanner_status", handleScannerStatus)
-	http.HandleFunc("/api/scan", handleScan)
-	http.HandleFunc("/api/log/start", handleLogStart)
-	http.HandleFunc("/api/log/stop", handleLogStop)
-	http.HandleFunc("/api/log_server_status", handleLogStatus)
-	http.HandleFunc("/api/connect", handleConnect)
-	http.HandleFunc("/api/disconnect", handleDisconnect)
-	http.HandleFunc("/api/send", handleSend)
+	mux := http.NewServeMux()
+	mux.Handle("/", http.FileServer(http.Dir(staticDir)))
+	mux.HandleFunc("/api/scanner/start", handleScannerStart)
+	mux.HandleFunc("/api/scanner/stop", handleScannerStop)
+	mux.HandleFunc("/api/scanner_status", handleScannerStatus)
+	mux.HandleFunc("/api/scan", handleScan)
+	mux.HandleFunc("/api/log/start", handleLogStart)
+	mux.HandleFunc("/api/log/stop", handleLogStop)
+	mux.HandleFunc("/api/log_server_status", handleLogStatus)
+	mux.HandleFunc("/api/connect", handleConnect)
+	mux.HandleFunc("/api/disconnect", handleDisconnect)
+	mux.HandleFunc("/api/send", handleSend)
 
 	go func() {
 		log.Printf("WS Server on :%d", WSPort)
-		mux := http.NewServeMux()
-		mux.HandleFunc("/", handleWS)
-		http.ListenAndServe(fmt.Sprintf(":%d", WSPort), mux)
+		wsMux := http.NewServeMux()
+		wsMux.HandleFunc("/", handleWS)
+		http.ListenAndServe(fmt.Sprintf(":%d", WSPort), wsMux)
 	}()
 
-	go func() {
-		time.Sleep(1 * time.Second)
-		url := fmt.Sprintf("http://127.0.0.1:%d", HTTPPort)
-		browser.OpenURL(url)
-	}()
-
+	httpServer = &http.Server{Addr: fmt.Sprintf(":%d", HTTPPort), Handler: mux}
 	log.Printf("HTTP Server on :%d", HTTPPort)
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", HTTPPort), nil); err != nil {
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
 
+//export Stop
+func Stop() {
 	if state.FTPServer != nil {
 		state.FTPServer.Stop()
 	}
+	if httpServer != nil {
+		httpServer.Close()
+	}
+	StopLogServer()
+	StopContinuousScanner()
 }
+
+func main() {}

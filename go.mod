@@ -1,11 +1,10 @@
 module probe-tool
 
-go 1.25.0
+go 1.22.0
 
 require (
 	github.com/fclairamb/ftpserverlib v0.27.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/spf13/afero v1.15.0
 )
 
