@@ -51,7 +51,6 @@ jobs:
           
           # 下载 bind 依赖
           go get golang.org/x/mobile/bind
-          go mod tidy
 
           gomobile bind -target=android -androidapi 24 -o main.aar .
         env:
