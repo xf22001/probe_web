@@ -1,13 +1,11 @@
 name: Build Windows Executable (Go)
 
 on:
-  # push:
-  #   branches:
-  #     - main
-  # pull_request:
-  #   branches:
-  #     - main
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.go'
+      - 'go.mod'
 
 jobs:
   build-windows-go:
