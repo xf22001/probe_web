@@ -633,6 +633,9 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&b)
 	raw, _ := base64.StdEncoding.DecodeString(b.DataBase64)
+	if b.Stage == 0 {
+		raw = append(raw, 0)
+	}
 	payload := EncodeRequest(uint32(b.Fn), uint32(b.Stage), raw)
 	state.ConnectionsLock.Lock()
 	dc, ok := state.Connections[b.IP]
