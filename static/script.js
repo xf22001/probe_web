@@ -486,6 +486,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // === 允许在输入框按 Enter 键触发发送 (并保存历史) ===
+    commandInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault(); // 防止默认换行或其他行为
+            if (!sendCommandButton.disabled) {
+                // 直接复用 sendCommandButton 的点击逻辑，确保逻辑一致
+                sendCommandButton.click();
+            }
+        }
+    });
+
     startLogButton.addEventListener('click', async () => {
         startLogButton.disabled = true; 
         try {
