@@ -1,3 +1,0 @@
-websockets==10.4
-pyftpdlib
-PyInstaller

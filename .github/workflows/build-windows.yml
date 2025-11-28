@@ -1,55 +1,57 @@
-# .github/workflows/build-windows.yml
-name: Build Windows Executable
+name: Build Windows Executable (Go)
 
 on:
   # push:
   #   branches:
-  #     - main # 或者 'master'，取决于您的主分支名称
+  #     - main
   # pull_request:
   #   branches:
-  #     - main # 或者 'master'
-  workflow_dispatch: # 允许手动触发工作流
+  #     - main
+  workflow_dispatch: # 允许手动触发
 
 jobs:
-  build-windows-exe:
-    runs-on: windows-latest # 使用最新的 Windows 运行器
+  build-windows-go:
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4 # 检查代码
+        uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          python-version: '3.10' # 使用 Python 3.10，与您的 start.sh 保持一致
-          cache: 'pip' # 缓存 pip 包以加速后续构建
+          go-version: '1.22' # 使用较新的 Go 版本
+          cache: true        # 自动开启依赖缓存
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # 为确保 PyInstaller 总是被安装，可以额外加一行：
-          # pip install PyInstaller
+          go mod tidy
+          # 如果有其他特定工具可以在这里安装
 
-      - name: Build Windows Executable with PyInstaller (Console Mode)
+      - name: Build Windows Executable
         run: |
-          # 修正：使用 '--console' 参数来在前台运行并显示日志
-          python -m PyInstaller --console `
-                                --onefile `
-                                --name "ProbeWebTool" `
-                                --add-data "static;static" `
-                                --hidden-import "pyftpdlib.ioloop" `
-                                --hidden-import "pyftpdlib.log" `
-                                app.py
-        # 注意：在 Windows shell (PowerShell/CMD) 中，` 是行继续符，而不是 \。
+          # 设置环境变量以确保构建目标为 Windows amd64
+          $Env:GOOS = "windows"
+          $Env:GOARCH = "amd64"
+          
+          # 编译 main.go，输出为 ProbeWebTool.exe
+          # -ldflags "-s -w" 用于减小二进制体积（去除调试符号）
+          go build -ldflags "-s -w" -o ProbeWebTool.exe main.go
 
-      - name: Upload Windows Executable Artifact
+      - name: Prepare Distribution Directory
+        run: |
+          # 创建 dist 目录
+          New-Item -ItemType Directory -Force -Path dist
+          
+          # 将 exe 移动到 dist
+          Move-Item -Path ProbeWebTool.exe -Destination dist/
+          
+          # 将 static 文件夹复制到 dist (因为 Go 代码中是读取 ./static 目录)
+          Copy-Item -Path static -Destination dist/ -Recurse
+
+      - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ProbeWebTool-Windows-Executable-Console
-          path: dist/ProbeWebTool.exe
-          # retention-days: 7 
-
-      - name: List dist directory content (for debugging)
-        run: |
-          Get-ChildItem -Recurse dist/
+          name: ProbeWebTool-Windows-Bundle
+          path: dist/ # 上传整个 dist 目录，确保 exe 能找到 static 文件夹
+          # retention-days: 7
