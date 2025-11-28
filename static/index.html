@@ -51,7 +51,13 @@
         <footer class="bottom-command-panel">
             <div class="section command-section">
                 <h3>Send Command (Text)</h3>
-                <input type="text" id="commandInput" placeholder="Enter text command">
+                <!-- 修改开始: 增加 input-wrapper 包裹输入框和历史列表 -->
+                <div class="input-wrapper">
+                    <!-- 历史记录列表容器 -->
+                    <ul id="commandHistoryList" class="history-list" style="display: none;"></ul>
+                    <input type="text" id="commandInput" placeholder="Enter text command" autocomplete="off">
+                </div>
+                <!-- 修改结束 -->
                 <button id="sendCommandButton" disabled>Send Text Command</button>
             </div>
         </footer>

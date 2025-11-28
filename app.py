@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, Set
 import websockets
 import traceback
 import logging
+import webbrowser # <--- 新增: 导入浏览器模块
 
 # 导入自定义模块
 from scanner import UdpDiscoveryServer, BROADCAST_PORT
@@ -499,6 +500,14 @@ async def main_startup_logic():
     main_loop_state_instance.ftp_server = ProbeFtpServer(host="0.0.0.0", port=2121, username="user", password="12345") 
     main_loop_state_instance.ftp_server.start() 
     logger.info("FTP Server automatically started in the background.")
+    
+    # === 自动打开浏览器 ===
+    try:
+        url = f"http://127.0.0.1:{HTTP_PORT}"
+        logger.info(f"Opening default browser at {url}")
+        webbrowser.open(url)
+    except Exception as e:
+        logger.error(f"Failed to open browser: {e}")
 
     async with start_server:
         logger.info(f"All background services initialized. HTTP on {HTTP_PORT}, WS on {WS_PORT}. Awaiting shutdown signal.")

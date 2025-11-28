@@ -22,6 +22,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Send Command (Text) Section
     const commandInput = document.getElementById('commandInput');
     const sendCommandButton = document.getElementById('sendCommandButton');
+    // 新增: 获取历史记录列表元素
+    const commandHistoryList = document.getElementById('commandHistoryList');
     
     // Log Stream Section
     const startLogButton = document.getElementById('startLogButton');
@@ -33,6 +35,112 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentDevices = []; // To store the latest device snapshot
     let scannerIsRunning = false; // To track the state of the *continuous* scanner (started/stopped)
     let logServerIsRunning = false; // To track the state of the log server (started/stopped)
+
+    // === 新增: 历史记录管理逻辑 ===
+    const MAX_HISTORY_ITEMS = 10;
+    const HISTORY_STORAGE_KEY = 'probe_tool_cmd_history';
+    let commandHistory = [];
+
+    // 从 localStorage 加载历史
+    function loadHistory() {
+        try {
+            const stored = localStorage.getItem(HISTORY_STORAGE_KEY);
+            if (stored) {
+                commandHistory = JSON.parse(stored);
+            }
+        } catch (e) {
+            console.error('JS ERROR: Failed to load history:', e);
+            commandHistory = [];
+        }
+    }
+
+    // 保存历史到 localStorage
+    function saveHistory() {
+        localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(commandHistory));
+    }
+
+    // 添加命令到历史
+    function addCommandToHistory(cmd) {
+        if (!cmd) return;
+        // 如果命令已存在，先移除旧的
+        const existingIndex = commandHistory.indexOf(cmd);
+        if (existingIndex !== -1) {
+            commandHistory.splice(existingIndex, 1);
+        }
+        // 添加到头部
+        commandHistory.unshift(cmd);
+        // 限制数量
+        if (commandHistory.length > MAX_HISTORY_ITEMS) {
+            commandHistory.pop();
+        }
+        saveHistory();
+        renderHistoryList();
+    }
+
+    // 删除单条历史
+    function deleteHistoryItem(e, index) {
+        e.stopPropagation(); // 防止触发 li 的点击事件（即防止填充输入框）
+        commandHistory.splice(index, 1);
+        saveHistory();
+        renderHistoryList();
+        // 如果删完了，隐藏列表
+        if (commandHistory.length === 0) {
+            commandHistoryList.style.display = 'none';
+        }
+    }
+
+    // 渲染历史列表 UI
+    function renderHistoryList() {
+        commandHistoryList.innerHTML = '';
+        if (commandHistory.length === 0) {
+            commandHistoryList.style.display = 'none';
+            return;
+        }
+
+        commandHistory.forEach((cmd, index) => {
+            const li = document.createElement('li');
+            
+            // 命令文本区
+            const spanText = document.createElement('span');
+            spanText.className = 'history-text';
+            spanText.textContent = cmd;
+            
+            // 点击文本填充输入框
+            li.addEventListener('click', () => {
+                commandInput.value = cmd;
+                commandHistoryList.style.display = 'none'; // 选择后隐藏列表
+            });
+
+            // 删除按钮
+            const spanDelete = document.createElement('span');
+            spanDelete.className = 'history-delete-btn';
+            spanDelete.innerHTML = '&times;'; // X 符号
+            spanDelete.title = 'Remove from history';
+            spanDelete.addEventListener('click', (e) => deleteHistoryItem(e, index));
+
+            li.appendChild(spanText);
+            li.appendChild(spanDelete);
+            commandHistoryList.appendChild(li);
+        });
+    }
+
+    // 初始化加载历史
+    loadHistory();
+
+    // 输入框聚焦时显示历史（如果有）
+    commandInput.addEventListener('focus', () => {
+        if (commandHistory.length > 0) {
+            renderHistoryList();
+            commandHistoryList.style.display = 'block';
+        }
+    });
+
+    // 点击页面其他地方隐藏历史列表
+    document.addEventListener('click', (e) => {
+        if (!commandInput.contains(e.target) && !commandHistoryList.contains(e.target)) {
+            commandHistoryList.style.display = 'none';
+        }
+    });
 
     // === UI 更新函数 ===
 
@@ -343,6 +451,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const ip = deviceSelect.value;
         const text = commandInput.value;
         if (!ip || !text) return; 
+
+        // === 新增: 保存到历史 ===
+        addCommandToHistory(text);
+        // =======================
 
         sendCommandButton.disabled = true; 
         
