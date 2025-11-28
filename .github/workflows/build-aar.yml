@@ -28,39 +28,34 @@ jobs:
 
       - name: Setup Android SDK & NDK
         run: |
-          # 接受 SDK 协议并安装指定版本的 NDK
-          # gomobile 对 NDK 版本敏感，25.x 通常较稳定
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
 
       - name: Install gomobile tools
         run: |
-          # 1. 安装 gomobile 命令行工具
           go install golang.org/x/mobile/cmd/gomobile@latest
-          # 2. 关键修复：安装 gobind 工具 (报错是因为缺这个或版本不对)
           go install golang.org/x/mobile/cmd/gobind@latest
-          
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
       - name: Initialize gomobile
         run: gomobile init
+        env:
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653
 
       - name: Build AAR
         run: |
-          # 1. 初始化 go.mod (如果不存在)
           if [ ! -f go.mod ]; then
             go mod init com.xiaofei.probetool
           fi
           
-          # 2. 关键修复：下载项目所需的 mobile 依赖
-          # gomobile bind 生成代码时需要引用这些包
+          # 下载 bind 依赖
           go get golang.org/x/mobile/bind
           go mod tidy
 
-          # 3. 编译生成 main.aar
-          # 注意：请确保你的 .go 文件包名不是 'package main'
-          gomobile bind -target=android -o main.aar .
+          gomobile bind -target=android -androidapi 24 -o main.aar .
+        env:
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653
 
       - name: Upload AAR Artifact
         uses: actions/upload-artifact@v4
