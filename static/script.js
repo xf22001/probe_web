@@ -320,11 +320,11 @@ document.addEventListener('DOMContentLoaded', () => {
     function applySidePanelState() {
         if (isSidePanelCollapsed) {
             sidePanel.classList.add('collapsed');
-            toggleSidePanelButton.textContent = '展开面板';
+            toggleSidePanelButton.textContent = 'Expand panel';
             toggleSidePanelButton.setAttribute('aria-expanded', 'false');
         } else {
             sidePanel.classList.remove('collapsed');
-            toggleSidePanelButton.textContent = '收起面板';
+            toggleSidePanelButton.textContent = 'Collapse panel';
             toggleSidePanelButton.setAttribute('aria-expanded', 'true');
         }
     }
