@@ -1,69 +1,69 @@
-name: Build Probetool AAR
+name: Build Go Android AAR
 
 on:
-  push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
+  push:
+    paths:
+      - '**.go'
+      - 'go.mod'
 
 jobs:
-  build-android-library:
+  build:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Go 1.22
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.22.0'
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
 
-    - name: Set up Java 17
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '17'
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
+      - name: Setup Android SDK & NDK
+        run: |
+          # 接受 SDK 协议并安装指定版本的 NDK
+          # gomobile 对 NDK 版本敏感，25.x 通常较稳定
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653"
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
 
-    - name: Install Android NDK
-      # 即使安装了特定版本，gomobile 可能会自动检测到环境中最新的 NDK (v27)
-      # 但只要我们指定了 -androidapi 24，使用 NDK 27 就没问题
-      run: sdkmanager --install "ndk;25.2.9519653"
+      - name: Install gomobile tools
+        run: |
+          # 1. 安装 gomobile 命令行工具
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          # 2. 关键修复：安装 gobind 工具 (报错是因为缺这个或版本不对)
+          go install golang.org/x/mobile/cmd/gobind@latest
+          
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
 
-    - name: Install Gomobile Toolchain
-      run: |
-        go install golang.org/x/mobile/cmd/gomobile@latest
-        gomobile init
+      - name: Initialize gomobile
+        run: gomobile init
 
-    - name: Initialize Dependencies
-      run: |
-        if [ ! -f go.mod ]; then
-          go mod init probetool
-        fi
-        go mod tidy
+      - name: Build AAR
+        run: |
+          # 1. 初始化 go.mod (如果不存在)
+          if [ ! -f go.mod ]; then
+            go mod init com.xiaofei.probetool
+          fi
+          
+          # 2. 关键修复：下载项目所需的 mobile 依赖
+          # gomobile bind 生成代码时需要引用这些包
+          go get golang.org/x/mobile/bind
+          go mod tidy
 
-    - name: Prepare Code for Binding
-      run: |
-        echo "Converting package main to package probetool..."
-        sed -i 's/package main/package probetool/' *.go
-        # 删除 func main() {}
-        sed -i 's/func main() {}//' *.go || true
+          # 3. 编译生成 main.aar
+          # 注意：请确保你的 .go 文件包名不是 'package main'
+          gomobile bind -target=android -o main.aar .
 
-    - name: Build AAR
-      run: |
-        # === 修复点在这里 ===
-        # 添加 -androidapi 24
-        #这会告诉 gomobile 针对 API 24 编译，而不是默认的 16
-        # NDK 27 支持范围是 21..35，所以 24 是安全的
-        
-        gomobile bind -v -target=android -androidapi 24 -ldflags="-s -w" -o probetool.aar .
-
-    - name: Upload AAR Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: probetool-lib
-        path: |
-          probetool.aar
-          probetool-sources.jar
+      - name: Upload AAR Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-aar
+          path: main.aar
