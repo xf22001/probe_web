@@ -52,7 +52,7 @@ jobs:
           # 下载 bind 依赖
           go get golang.org/x/mobile/bind
 
-          gomobile bind -target=android -androidapi 24 -o main.aar .
+          gomobile bind -target=android -androidapi 24 -javapkg=com.xiaofei.probetool.lib -o main.aar .
         env:
           ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653
 
