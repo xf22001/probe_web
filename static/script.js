@@ -1,7 +1,7 @@
 // ./static/script.js
 
 document.addEventListener('DOMContentLoaded', () => {
-    // === 获取所有前端元素 (UI引用保持不变) ===
+    // === 获取所有前端元素 ===
     // Device Discovery Section
     const startScannerButton = document.getElementById('startScannerButton');
     const stopScannerButton = document.getElementById('stopScannerButton');
@@ -25,10 +25,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const clearLogButton = document.getElementById('clearLogButton'); 
     const logOutput = document.getElementById('logOutput');
 
+    // 新增：侧边栏相关元素
+    const toggleSidePanelButton = document.getElementById('toggleSidePanelButton');
+    const sidePanel = document.querySelector('.side-panel');
+
     // === 内部状态变量 ===
     let currentDevices = []; 
     let scannerIsRunning = false; 
     let logServerIsRunning = false; 
+    // 新增：侧边栏状态
+    let isSidePanelCollapsed = false; 
+    const SIDE_PANEL_STATE_KEY = 'probe_tool_side_panel_collapsed'; 
 
     // === WebSocket 变量 (修改为 let 以便重连时重新赋值) ===
     let wsDevices = null;
@@ -38,7 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.hostname}:8001`;
 
-    // === WebSocket 连接函数 (新增核心逻辑) ===
+    // === WebSocket 连接函数 ===
     
     function connectDeviceWebSocket() {
         console.log('JS DEBUG: Attempting to connect Device WebSocket...');
@@ -47,14 +54,11 @@ document.addEventListener('DOMContentLoaded', () => {
         wsDevices.onopen = () => {
             console.log('JS DEBUG: Connected to Device WebSocket. Sending registration...');
             wsDevices.send(JSON.stringify({ type: 'devices' })); 
-            // 重连成功后刷新一下状态
             fetchScannerStatus(); 
             fetchLogServerStatus(); 
-            // 如果 UI 上显示连接断开，这里可以加逻辑恢复颜色等
         };
 
         wsDevices.onmessage = (event) => {
-            // console.log('JS DEBUG: Received message on device WS:', event.data); //以此减少日志噪音
             try {
                 const message = JSON.parse(event.data);
                 if (message.type === 'devices') {
@@ -71,13 +75,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         wsDevices.onclose = (event) => {
             console.log(`JS DEBUG: Device WebSocket closed (Code: ${event.code}). Reconnecting in ${RECONNECT_DELAY}ms...`);
-            // 关键：连接关闭后，设置定时器重新调用连接函数
             setTimeout(connectDeviceWebSocket, RECONNECT_DELAY);
         };
 
         wsDevices.onerror = (error) => {
             console.error('JS ERROR: Device WebSocket error:', error);
-            // onerror 通常紧接着 onclose，所以重连逻辑在 onclose 处理即可
         };
     }
 
@@ -128,7 +130,7 @@ document.addEventListener('DOMContentLoaded', () => {
     connectDeviceWebSocket();
     connectLogWebSocket();
 
-    // === 历史记录管理逻辑 (保持不变) ===
+    // === 历史记录管理逻辑 ===
     const MAX_HISTORY_ITEMS = 10;
     const HISTORY_STORAGE_KEY = 'probe_tool_cmd_history';
     let commandHistory = [];
@@ -219,10 +221,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // === UI 更新函数 (保持不变) ===
+    // === UI 更新函数 ===
 
     function updateDeviceControlButtons() {
-        // console.log('JS DEBUG: updateDeviceControlButtons called.');
         const selectedIp = deviceSelect.value;
         const selectedDevice = currentDevices.find(d => d.ip === selectedIp);
         const isConnected = selectedDevice && selectedDevice.status === 'Connected';
@@ -315,7 +316,41 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // === Event Listeners (UI交互逻辑保持不变) ===
+    // 新增：侧边栏状态管理函数
+    function applySidePanelState() {
+        if (isSidePanelCollapsed) {
+            sidePanel.classList.add('collapsed');
+            toggleSidePanelButton.textContent = '展开面板';
+            toggleSidePanelButton.setAttribute('aria-expanded', 'false');
+        } else {
+            sidePanel.classList.remove('collapsed');
+            toggleSidePanelButton.textContent = '收起面板';
+            toggleSidePanelButton.setAttribute('aria-expanded', 'true');
+        }
+    }
+
+    function loadSidePanelState() {
+        try {
+            const storedState = localStorage.getItem(SIDE_PANEL_STATE_KEY);
+            if (storedState !== null) {
+                isSidePanelCollapsed = JSON.parse(storedState);
+            }
+        } catch (e) {
+            console.error('JS ERROR: Failed to load side panel state from localStorage:', e);
+            isSidePanelCollapsed = false; // 出错时默认展开
+        }
+        applySidePanelState();
+    }
+
+    function saveSidePanelState() {
+        try {
+            localStorage.setItem(SIDE_PANEL_STATE_KEY, JSON.stringify(isSidePanelCollapsed));
+        } catch (e) {
+            console.error('JS ERROR: Failed to save side panel state to localStorage:', e);
+        }
+    }
+
+    // === Event Listeners ===
 
     startScannerButton.addEventListener('click', async () => {
         startScannerButton.disabled = true; 
@@ -476,8 +511,16 @@ document.addEventListener('DOMContentLoaded', () => {
         logOutput.innerHTML = ''; 
     });
 
+    // 新增：侧边栏切换按钮的事件监听器
+    toggleSidePanelButton.addEventListener('click', () => {
+        isSidePanelCollapsed = !isSidePanelCollapsed;
+        applySidePanelState();
+        saveSidePanelState();
+    });
+
     // === Initial Setup on Page Load ===
     updateDeviceControlButtons(); 
     fetchScannerStatus(); 
     fetchLogServerStatus(); 
+    loadSidePanelState(); // 页面加载时加载侧边栏状态
 });

@@ -25,7 +25,7 @@ body {
     width: 100%; 
     height: 100%; 
     background-color: #fff;
-    overflow: hidden;
+    overflow: hidden; /* 确保主容器内的滚动由子元素控制 */
 }
 
 /* === 顶部 Header === */
@@ -37,12 +37,15 @@ header {
     display: flex;
     align-items: center;
     flex-shrink: 0;
+    justify-content: space-between; /* 新增: 使标题和按钮左右对齐 */
+    gap: 10px; /* 新增: 标题和按钮之间的间距 */
 }
 
 header h1 {
     margin: 0;
     font-size: 1.1rem;
     color: #0056b3;
+    flex-shrink: 0; /* 新增: 防止标题在空间不足时收缩 */
 }
 
 /* === 中间区域 (侧边栏 + 日志) === */
@@ -63,6 +66,22 @@ header h1 {
     display: flex;
     flex-direction: column;
     gap: 15px;
+    /* 新增: 平滑过渡效果 */
+    transition: width 0.3s ease, padding 0.3s ease, opacity 0.3s ease, max-height 0.3s ease, border-width 0.3s ease;
+    overflow-x: hidden; /* 防止内容在收缩时溢出 */
+    flex-shrink: 0; /* 确保在flex容器中能正确收缩 */
+}
+
+/* 新增: 侧边栏收起时的样式 */
+.side-panel.collapsed {
+    width: 0;
+    min-width: 0; /* 覆盖最小宽度 */
+    padding-left: 0;
+    padding-right: 0;
+    opacity: 0;
+    border-right: none; /* 收起时移除边框 */
+    pointer-events: none; /* 收起时禁用交互 */
+    margin-right: -1px; /* 略微调整以完全隐藏边框，防止渲染问题 */
 }
 
 .center-content {
@@ -193,6 +212,14 @@ button:disabled { background-color: #e0e0e0; color: #999; }
 
 .small-button { height: 28px; font-size: 12px; }
 
+/* 新增: Header中切换按钮的样式 */
+.header-toggle-button {
+    padding: 0 10px;
+    height: 36px;
+    font-size: 0.9rem;
+    white-space: nowrap; /* 防止文本换行 */
+}
+
 #deviceList {
     list-style: none;
     padding: 0;
@@ -223,11 +250,20 @@ button:disabled { background-color: #e0e0e0; color: #999; }
     /* 2. 侧边栏在顶部 */
     .side-panel {
         width: 100%;
-        height: auto;
-        max-height: 220px; /* 限制高度 */
+        height: auto; /* 默认高度由内容决定 */
+        max-height: 220px; /* 限制最大高度，默认展开状态 */
         border-right: none;
         border-bottom: 1px solid #ccc;
         flex-shrink: 0;
+    }
+    
+    /* 新增: 移动端侧边栏收起时的样式 */
+    .side-panel.collapsed {
+        max-height: 0; /* 收起时高度为0 */
+        padding-top: 0;
+        padding-bottom: 0;
+        border-bottom: none; /* 收起时移除边框 */
+        margin-bottom: -1px; /* 略微调整以完全隐藏边框 */
     }
 
     /* 3. 日志区域 */
@@ -258,6 +294,12 @@ button:disabled { background-color: #e0e0e0; color: #999; }
     }
     
     .small-button { height: 32px; }
+    
+    /* 移动端Header中的切换按钮样式调整 */
+    .header-toggle-button {
+        height: 44px; /* 适应移动端触控尺寸 */
+        font-size: 1rem;
+    }
 
     /* 隐藏标题节省空间 */
     .command-section h3 { display: none; }
