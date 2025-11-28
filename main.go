@@ -196,7 +196,7 @@ func (d *FTPDriver) AuthUser(cc ftpserver.ClientContext, user, pass string) (ftp
 	// 限制在 BaseDir 下
 	restrictedFs := afero.NewBasePathFs(baseFs, d.BaseDir)
 
-	if user == "user" && pass == "123" {
+	if user == "user" && pass == "12345" {
 		// 直接使用嵌入了 afero.Fs 的结构体，自动获得所有文件操作方法
 		return &FTPClientDriver{Fs: restrictedFs}, nil
 	}
