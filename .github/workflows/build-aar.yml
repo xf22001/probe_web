@@ -3,7 +3,7 @@ name: Build Probetool AAR
 on:
   push:
     branches: [ "main", "master" ]
-  workflow_dispatch: # 允许在 GitHub 网页上手动点击按钮触发
+  workflow_dispatch:
 
 jobs:
   build-android-library:
@@ -18,7 +18,7 @@ jobs:
       with:
         go-version: '1.22.0'
 
-    - name: Set up Java 17 (Required for Android SDK)
+    - name: Set up Java 17
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
@@ -28,7 +28,8 @@ jobs:
       uses: android-actions/setup-android@v3
 
     - name: Install Android NDK
-      # Gomobile 依赖 NDK，安装一个稳定版本
+      # 即使安装了特定版本，gomobile 可能会自动检测到环境中最新的 NDK (v27)
+      # 但只要我们指定了 -androidapi 24，使用 NDK 27 就没问题
       run: sdkmanager --install "ndk;25.2.9519653"
 
     - name: Install Gomobile Toolchain
@@ -38,30 +39,26 @@ jobs:
 
     - name: Initialize Dependencies
       run: |
-        # 确保 go.mod 存在并下载依赖
         if [ ! -f go.mod ]; then
           go mod init probetool
         fi
         go mod tidy
 
     - name: Prepare Code for Binding
-      # === 关键步骤 ===
-      # Gomobile bind 不能编译 package main。
-      # 这里使用 sed 命令将包名改为 'probetool' 并移除 main 函数。
       run: |
         echo "Converting package main to package probetool..."
         sed -i 's/package main/package probetool/' *.go
-        
-        # 删除 func main() {} 以避免冲突
-        # 假设 main 函数是空的或只有一行，如果很复杂建议手动注释
+        # 删除 func main() {}
         sed -i 's/func main() {}//' *.go || true
 
     - name: Build AAR
       run: |
-        # -target=android: 目标平台
-        # -o: 输出文件名 (必须与你在 build.gradle 中引用的名字一致)
-        # -ldflags="-s -w": 减小文件体积
-        gomobile bind -v -target=android -ldflags="-s -w" -o probetool.aar .
+        # === 修复点在这里 ===
+        # 添加 -androidapi 24
+        #这会告诉 gomobile 针对 API 24 编译，而不是默认的 16
+        # NDK 27 支持范围是 21..35，所以 24 是安全的
+        
+        gomobile bind -v -target=android -androidapi 24 -ldflags="-s -w" -o probetool.aar .
 
     - name: Upload AAR Artifact
       uses: actions/upload-artifact@v4
