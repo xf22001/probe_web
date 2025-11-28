@@ -1,4 +1,4 @@
-module main
+module probetool
 
 go 1.24.0
 
