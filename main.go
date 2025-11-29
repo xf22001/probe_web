@@ -38,6 +38,7 @@ var (
 	LogDir     = "logs"
 	FTPRootDir = "ftp_share"
 	httpServer *http.Server
+	appTimeZone *time.Location // Global timezone variable
 )
 
 // ==========================================
@@ -400,7 +401,14 @@ func StartLogServer() error {
 	if _, err := os.Stat(LogDir); os.IsNotExist(err) {
 		os.Mkdir(LogDir, 0755)
 	}
-	timestamp := time.Now().Format("20060102_150405")
+	// Use appTimeZone for formatting if available
+	var now time.Time
+	if appTimeZone != nil {
+		now = time.Now().In(appTimeZone)
+	} else {
+		now = time.Now()
+	}
+	timestamp := now.Format("20060102_150405")
 	filename := filepath.Join(LogDir, fmt.Sprintf("log_%s.txt", timestamp))
 
 	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -433,7 +441,13 @@ func StartLogServer() error {
 					continue
 				}
 				msg := string(buf[:n])
-				timeStr := time.Now().Format("2006-01-02 15:04:05.000")
+				var logTime time.Time
+				if appTimeZone != nil {
+					logTime = time.Now().In(appTimeZone)
+				} else {
+					logTime = time.Now()
+				}
+				timeStr := logTime.Format("2006-01-02 15:04:05.000")
 				formatted := fmt.Sprintf("[%s] [%s] %s", timeStr, rAddr.IP.String(), strings.TrimSpace(msg))
 				state.BroadcastLog(formatted)
 				file.WriteString(formatted + "\n")
@@ -693,13 +707,24 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 // ==========================================
 
 //export Start
-func Start(ftpDir, logDir, staticDir string) {
+func Start(ftpDir, logDir, staticDir, timeZone string) {
 	FTPRootDir = ftpDir
 	LogDir = logDir
+
+	// Set the timezone for the Go application
+	loc, err := time.LoadLocation(timeZone)
+	if err != nil {
+		log.Printf("Error loading timezone %s: %v. Using UTC.", timeZone, err)
+		appTimeZone = time.UTC
+	} else {
+		appTimeZone = loc
+		log.Printf("Application timezone set to: %s", timeZone)
+	}
 
 	StartLogServer()
 	StartFTPServer()
 	go PerformTimedScan()
+
 
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.Dir(staticDir)))
