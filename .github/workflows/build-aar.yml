@@ -3,11 +3,11 @@ name: Build Go Android AAR
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'lib/**' # 确保 lib 目录下的文件变更也能触发
+  # push:
+  #   paths:
+  #     - '**.go'
+  #     - 'go.mod'
+  #     - 'lib/**' # 确保 lib 目录下的文件变更也能触发
 
 jobs:
   build:
