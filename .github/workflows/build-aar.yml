@@ -3,11 +3,12 @@ name: Build Go Android AAR
 
 on:
   workflow_dispatch:
-  # push:
-  #   paths:
-  #     - '**.go'
-  #     - 'go.mod'
-  #     - 'lib/**' # 确保 lib 目录下的文件变更也能触发
+  push:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'lib/**'
+      - 'android/**' # 确保 android 目录下的文件变更也能触发
 
 jobs:
   build:
@@ -26,37 +27,47 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25' # 已更新以匹配 go.mod 文件中指定的 Go 版本
+          go-version: '1.25' # 保持与 go.mod 中声明的 Go 版本一致
 
       - name: Setup Android SDK & NDK
         run: |
-          # 确保 ANDROID_HOME 变量在每次运行中都有效
+          # 确保 ANDROID_HOME 在当前 shell 会话中可用，并导出到环境中
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.2.9519653" "platform-tools" "build-tools;34.0.0" # 建议也安装 platform-tools 和一个 build-tools 版本
-        # env:
-        #   ANDROID_HOME: /usr/local/lib/android/sdk # 移到 env setup step 中
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          
+          # 将 Android SDK 命令行工具添加到 PATH，并在环境变量中持久化
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
+          
+          # 安装指定版本的 NDK
+          yes | sdkmanager "ndk;25.2.9519653"
+          
+          # 设置 ANDROID_NDK_HOME 环境变量供 gomobile 使用，并在环境中持久化
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653
 
       - name: Install gomobile tools
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH # 添加到 PATH，以便后续步骤可以直接调用 gomobile
-
-      - name: Initialize gomobile
-        run: gomobile init
-        env:
-          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653 # NDK 路径
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH # 添加到 PATH
 
       - name: Configure Go Module (if not exists) and Download Dependencies
         run: |
           if [ ! -f go.mod ]; then
-            # 使用我们的模块名称 probetool
             go mod init probetool 
           fi
           # go mod tidy 会自动下载所有依赖
           go mod tidy
+          # 从参考文件中采纳的关键行：下载 gomobile bind 所需的依赖
+          go get golang.org/x/mobile/bind
         env:
-          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653 # NDK 路径
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+      - name: Initialize gomobile
+        run: gomobile init
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       - name: Build AAR
         run: |
@@ -67,10 +78,10 @@ jobs:
           # probetool/android: 绑定 probetool 模块下的 android 包，该包包含 JNI 导出的函数
           gomobile bind -target=android -androidapi 24 -o probetool.aar -javapkg "com.xiaofei.probetool.lib.probetool" probetool/android
         env:
-          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653 # NDK 路径
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
       - name: Upload AAR Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: probetool-aar # Artifact 名称也应更改
-          path: probetool.aar # 上传生成的 AAR 文件
+          name: probetool-aar
+          path: probetool.aar
