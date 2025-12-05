@@ -1,3 +1,4 @@
+# .github/workflows/build-aar.yml
 name: Build Go Android AAR
 
 on:
@@ -25,7 +26,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25' # 已更新以匹配 go.mod 文件中指定的 Go 版本
 
       - name: Setup Android SDK & NDK
         run: |
@@ -61,10 +62,10 @@ jobs:
         run: |
           # 最终的 gomobile bind 命令
           # -target=android -androidapi 24: 目标平台和API级别
-          # -pkg "com.xiaofei.probetool.lib.probetool": 指定生成的Java/Kotlin包名
+          # -javapkg "com.xiaofei.probetool.lib.probetool": 指定生成的Java/Kotlin包名
           # -o probetool.aar: 指定输出文件名为 probetool.aar
-          # .: 绑定当前目录 (包含 main.go, probetool_android.go 以及 lib/)
-          gomobile bind -target=android -androidapi 24 -o probetool.aar -javapkg "com.xiaofei.probetool.lib.probetool" .
+          # probetool/android: 绑定 probetool 模块下的 android 包，该包包含 JNI 导出的函数
+          gomobile bind -target=android -androidapi 24 -o probetool.aar -javapkg "com.xiaofei.probetool.lib.probetool" probetool/android
         env:
           ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653 # NDK 路径
 
