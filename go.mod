@@ -1,4 +1,4 @@
-module probe-tool
+module probetool
 
 go 1.25.0
 
