@@ -742,7 +742,7 @@ func (s *ServerState) ConnectToDevice(ip string) (string, error) {
 		return "", err
 	}
 
-	localIP := strings.Split(conn.LocalAddr().String(), ":")[0]
+	localIP := conn.LocalAddr().(*net.UDPAddr).IP.String()
 	stopChan := make(chan struct{})
 
 	// For each connection, create and initialize a Reassembler instance
