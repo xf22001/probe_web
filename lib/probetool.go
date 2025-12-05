@@ -137,7 +137,7 @@ func DecodeRequest(buffer []byte) (map[string]interface{}, uint32, uint32, uint3
 	binary.Read(reader, binary.LittleEndian, &crcReceived)
 
 	if magic != DefaultRequestMagic {
-		return nil, 0, 0, 0, nil, fmt.Errorf("invalid magic 0x%x, expected 0x%x", magic, DefaultRequestMagic)
+		return nil, 0, 0, 0, nil, fmt.Errorf("invalid magic 0x%x, expected 0x%x", magic, uint32(DefaultRequestMagic))
 	}
 	if len(buffer) < int(RequestTSize+dataSize) {
 		return nil, 0, 0, 0, nil, fmt.Errorf("incomplete data payload (expected %d bytes, got %d in buffer after header)", dataSize, len(buffer)-RequestTSize)

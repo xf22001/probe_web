@@ -6,7 +6,8 @@ on:
   #   paths:
   #     - '**.go'
   #     - 'go.mod'
-  #     - 'lib/**' # 确保 lib 目录下的文件变更也能触发
+  #     - 'lib/**'
+  #     - 'android/**' # 确保 android 目录下的文件变更也能触发
 
 jobs:
   build-windows-go:
