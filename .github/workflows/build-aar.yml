@@ -64,7 +64,7 @@ jobs:
           # -pkg "com.xiaofei.probetool.lib.probetool": 指定生成的Java/Kotlin包名
           # -o probetool.aar: 指定输出文件名为 probetool.aar
           # .: 绑定当前目录 (包含 main.go, probetool_android.go 以及 lib/)
-          gomobile bind -target=android -androidapi 24 -o probetool.aar -pkg "com.xiaofei.probetool.lib.probetool" .
+          gomobile bind -target=android -androidapi 24 -o probetool.aar -javapkg "com.xiaofei.probetool.lib.probetool" .
         env:
           ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653 # NDK 路径
 
