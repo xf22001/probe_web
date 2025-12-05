@@ -74,8 +74,8 @@ jobs:
           # -target=android -androidapi 24: 目标平台和API级别
           # -javapkg "com.xiaofei.probetool": 指定生成的Java/Kotlin包名
           # -o probetool.aar: 指定输出文件名为 probetool.aar
-          # probetool/service: 绑定 probetool 模块下的 service 包，该包包含 JNI 导出的函数
-          gomobile bind -target=android -androidapi 24 -o probetool.aar -javapkg "com.xiaofei.probetool" probetool/service
+          # probetool/server: 绑定 probetool 模块下的 server 包，该包包含 JNI 导出的函数
+          gomobile bind -target=android -androidapi 24 -o probetool.aar -javapkg "com.xiaofei.probetool" probetool/server
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
