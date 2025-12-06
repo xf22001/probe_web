@@ -511,7 +511,7 @@ func (s *ServerState) StartLogServer() error {
 	log.SetOutput(file)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	stopChan := make(chan struct{}) // <--- 修正: make(chan struct{})
+	stopChan := make(chan struct{})
 	s.LogServerStopChan = stopChan
 
 	go func() {
@@ -541,10 +541,8 @@ func (s *ServerState) StartLogServer() error {
 				}
 				msg := string(buf[:n])
 				timeStr := time.Now().Format("2006-01-02 15:04:05.000")
-				// --- 修正开始 ---
 				// rAddr 已经是 *net.UDPAddr 类型，可以直接访问 IP 字段
 				formatted := fmt.Sprintf("[%s] [%s] %s", timeStr, rAddr.IP.String(), strings.TrimSpace(msg))
-				// --- 修正结束 ---
 				s.BroadcastLog(formatted)          // Use s.BroadcastLog for WebSocket clients
 				file.WriteString(formatted + "\n") // Write to file
 			}
@@ -670,7 +668,7 @@ func (s *ServerState) StartContinuousScanner() error {
 	if s.ScannerStopChan != nil {
 		return fmt.Errorf("scanner already running")
 	}
-	stopChan := make(chan struct{}) // <--- 修正: make(chan struct{})
+	stopChan := make(chan struct{})
 	s.ScannerStopChan = stopChan
 	go s.RunUdpListener(stopChan)
 	log.Println("Continuous scanner started.")
@@ -791,13 +789,11 @@ func (s *ServerState) ConnectToDevice(ip string) (string, error) {
 					continue
 				}
 
-				// --- 修正开始 ---
 				// net.Conn.ReadFrom 返回的是 net.Addr 接口类型，需要断言为 *net.UDPAddr 才能访问 IP 字段
 				remoteIPStr := ip // 默认使用传入的连接IP，以防类型断言失败
 				if udpAddr, ok := rAddr.(*net.UDPAddr); ok && udpAddr != nil && udpAddr.IP != nil {
 					remoteIPStr = udpAddr.IP.String()
 				}
-				// --- 修正结束 ---
 
 				// Decode the received packet/fragment
 				info, totalSize, dataSize, dataOffset, fragmentData, decodeErr := DecodeRequest(buf[:n])
