@@ -13,14 +13,19 @@
             <!-- 新增：侧边栏切换按钮 -->
             <button id="toggleSidePanelButton" class="small-button header-toggle-button" aria-expanded="true">Collapse panel</button>
         </header>
+        <!-- 错误提示区域 -->
+        <div id="errorMessage" class="error-message" style="display: none;"></div>
 
         <div class="content-area">
             <aside class="side-panel">
                 <div class="section">
                     <h2>Device Discovery</h2>
-                    <button id="startScannerButton">Start Scanner</button>
-                    <button id="stopScannerButton" disabled>Stop Scanner</button>
-                    <button id="scanButton">Refresh Devices</button>
+                    <div class="button-group">
+                        <button id="startScannerButton" aria-label="Start continuous device scanning">Start Scanner</button>
+                        <button id="stopScannerButton" disabled aria-label="Stop continuous device scanning">Stop Scanner</button>
+                        <button id="scanButton" aria-label="Refresh device list">Refresh Devices</button>
+                        <div id="scannerLoadingIndicator" class="loading-indicator" style="display: none;" aria-live="polite">Scanning...</div>
+                    </div>
                     <ul id="deviceList"></ul>
                 </div>
                 <div class="section">
@@ -28,8 +33,11 @@
                     <select id="deviceSelect">
                         <option value="">-- Select a device --</option>
                     </select>
-                    <button id="connectButton">Connect</button>
-                    <button id="disconnectButton" disabled>Disconnect</button>
+                    <div class="button-group">
+                        <button id="connectButton" aria-label="Connect to selected device">Connect</button>
+                        <button id="disconnectButton" disabled aria-label="Disconnect from device">Disconnect</button>
+                        <div id="connectionLoadingIndicator" class="loading-indicator" style="display: none;" aria-live="polite">Connecting...</div>
+                    </div>
                     <!-- 新增: 连接信息显示区域 -->
                     <p id="connectionInfo" class="info-text"></p>
                 </div>
@@ -40,9 +48,10 @@
                     <div class="log-header-controls">
                         <h2>Log Stream</h2>
                         <div class="log-buttons-group">
-                            <button id="startLogButton" class="small-button">Start Log</button>
-                            <button id="stopLogButton" class="small-button" disabled>Stop Log</button>
-                            <button id="clearLogButton" class="small-button">Clear Log</button>
+                            <button id="startLogButton" class="small-button" aria-label="Start log streaming">Start Log</button>
+                            <button id="stopLogButton" class="small-button" disabled aria-label="Stop log streaming">Stop Log</button>
+                            <button id="clearLogButton" class="small-button" aria-label="Clear log display">Clear Log</button>
+                            <div id="logLoadingIndicator" class="loading-indicator small" style="display: none;" aria-live="polite">Starting...</div>
                         </div>
                     </div>
                     <div id="logOutput" class="log-area"></div>
@@ -58,6 +67,7 @@
                     <!-- 历史记录列表容器 -->
                     <ul id="commandHistoryList" class="history-list" style="display: none;"></ul>
                     <input type="text" id="commandInput" placeholder="Enter text command" autocomplete="off">
+                    <div id="commandSendingIndicator" class="loading-indicator inline" style="display: none;">Sending...</div>
                 </div>
                 <!-- 修改结束 -->
                 <button id="sendCommandButton" disabled>Send Text Command</button>
