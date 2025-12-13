@@ -48,6 +48,29 @@ header h1 {
     flex-shrink: 0; /* 新增: 防止标题在空间不足时收缩 */
 }
 
+/* 错误提示样式 */
+.error-message {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+    padding: 10px 15px;
+    margin: 0;
+    font-size: 0.9rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.error-message .close-btn {
+    background: none;
+    border: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    color: #721c24;
+    padding: 0;
+    margin-left: 10px;
+}
+
 /* === 中间区域 (侧边栏 + 日志) === */
 .content-area {
     display: flex; 
@@ -210,6 +233,42 @@ button {
 
 button:disabled { background-color: #e0e0e0; color: #999; }
 
+/* Loading indicator styles */
+.loading-indicator {
+    display: inline-block;
+    padding: 0 10px;
+    height: 36px;
+    line-height: 36px;
+    color: #007bff;
+    font-size: 14px;
+}
+
+.loading-indicator.small {
+    height: 28px;
+    line-height: 28px;
+    font-size: 12px;
+}
+
+.loading-indicator.inline {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    height: auto;
+    line-height: normal;
+}
+
+.button-group {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.button-group .loading-indicator {
+    flex-shrink: 0;
+}
+
 .small-button { height: 28px; font-size: 12px; }
 
 /* 新增: Header中切换按钮的样式 */
@@ -235,16 +294,67 @@ button:disabled { background-color: #e0e0e0; color: #999; }
 .info-text { font-size: 0.85em; margin-top: 5px; min-height: 1.2em; }
 .command-response { color: #ffd700; font-weight: bold; }
 
+/* Modal styles */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+}
+
+.modal-content {
+    background-color: white;
+    padding: 20px;
+    border-radius: 5px;
+    text-align: center;
+    max-width: 300px;
+    width: 80%;
+}
+
+.modal-buttons {
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 20px;
+}
+
+/* Focus styles for better accessibility */
+button:focus, input:focus, select:focus {
+    outline: 2px solid #007bff;
+    outline-offset: 2px;
+}
+
 /* =========================================
    === 移动端 强力适配 (Mobile Fix) ===
    ========================================= */
 @media (max-width: 768px) {
+    /* Modal styles for mobile */
+    .modal-content {
+        width: 90%;
+        padding: 15px;
+    }
+    
     /* 1. 改变布局方向 */
     .content-area {
         flex-direction: column;
         /* 关键：给底部留出空间，防止内容被 fixed 的 footer 遮挡 */
-        /* 60px 是 footer 的大致高度 */
-        padding-bottom: 60px; 
+        /* 使用 env() 函数更好地适配不同设备 */
+        padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+    }
+    
+    .button-group {
+        flex-wrap: nowrap;
+    }
+    
+    .button-group .loading-indicator {
+        height: 44px;
+        line-height: 44px;
     }
 
     /* 2. 侧边栏在顶部 */
@@ -255,6 +365,8 @@ button:disabled { background-color: #e0e0e0; color: #999; }
         border-right: none;
         border-bottom: 1px solid #ccc;
         flex-shrink: 0;
+        /* 添加平滑展开/收起动画 */
+        transition: max-height 0.3s ease, padding 0.3s ease;
     }
     
     /* 新增: 移动端侧边栏收起时的样式 */
@@ -271,6 +383,18 @@ button:disabled { background-color: #e0e0e0; color: #999; }
         height: auto;
         flex: 1; /* 自动填充剩余空间 */
         padding: 10px;
+        /* 确保在移动设备上有足够的最小高度 */
+        min-height: 200px;
+    }
+    
+    /* 改进日志显示区域在移动端的表现 */
+    .log-area {
+        font-size: 0.9rem; /* 稍微增大字体提高可读性 */
+        padding: 8px;
+        /* 添加触摸滚动优化 */
+        -webkit-overflow-scrolling: touch;
+        /* 确保在小屏幕上也有最小高度 */
+        min-height: 150px;
     }
 
     /* 4. 底部命令栏：使用绝对固定定位 (Nuclear Solution) */
@@ -285,6 +409,8 @@ button:disabled { background-color: #e0e0e0; color: #999; }
         /* 适配 iPhone 底部横条 */
         padding-bottom: max(8px, env(safe-area-inset-bottom));
         background-color: #fff; /* 必须有背景色，否则透明 */
+        /* 添加过渡动画使出现更平滑 */
+        transition: transform 0.3s ease;
     }
 
     /* 5. 增大触控尺寸 */

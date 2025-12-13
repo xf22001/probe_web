@@ -1,33 +1,92 @@
 // ./static/script.js
 
 document.addEventListener('DOMContentLoaded', () => {
+    // === 通用工具函数 ===
+    // 显示加载指示器
+    function showLoading(element) {
+        if (element) {
+            element.style.display = 'inline-block';
+        }
+    }
+
+    // 隐藏加载指示器
+    function hideLoading(element) {
+        if (element) {
+            element.style.display = 'none';
+        }
+    }
+
+    // 设置加载状态
+    function setLoadingState(element, isLoading) {
+        if (isLoading) {
+            showLoading(element);
+        } else {
+            hideLoading(element);
+        }
+    }
+
+    // 通用按钮状态更新函数
+    function updateButtonStates(config) {
+        Object.keys(config).forEach(buttonId => {
+            const button = document.getElementById(buttonId);
+            if (button) {
+                button.disabled = config[buttonId];
+            }
+        });
+    }
+
+    // 通用API请求函数
+    async function apiRequest(url, options = {}, loadingIndicator = null) {
+        setLoadingState(loadingIndicator, true);
+        try {
+            const response = await fetch(url, options);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.message || 'Request failed');
+            }
+            return data;
+        } catch (error) {
+            console.error('JS ERROR:', error);
+            throw error;
+        } finally {
+            setLoadingState(loadingIndicator, false);
+        }
+    }
+
     // === 获取所有前端元素 ===
     // Device Discovery Section
     const startScannerButton = document.getElementById('startScannerButton');
     const stopScannerButton = document.getElementById('stopScannerButton');
     const scanButton = document.getElementById('scanButton'); 
     const deviceList = document.getElementById('deviceList');
+    const scannerLoadingIndicator = document.getElementById('scannerLoadingIndicator');
 
     // Device Control Section
     const deviceSelect = document.getElementById('deviceSelect');
     const connectButton = document.getElementById('connectButton');
     const disconnectButton = document.getElementById('disconnectButton');
     const connectionInfo = document.getElementById('connectionInfo');
+    const connectionLoadingIndicator = document.getElementById('connectionLoadingIndicator');
     
     // Send Command (Text) Section
     const commandInput = document.getElementById('commandInput');
     const sendCommandButton = document.getElementById('sendCommandButton');
     const commandHistoryList = document.getElementById('commandHistoryList');
+    const commandSendingIndicator = document.getElementById('commandSendingIndicator');
     
     // Log Stream Section
     const startLogButton = document.getElementById('startLogButton');
     const stopLogButton = document.getElementById('stopLogButton');
     const clearLogButton = document.getElementById('clearLogButton'); 
     const logOutput = document.getElementById('logOutput');
+    const logLoadingIndicator = document.getElementById('logLoadingIndicator');
 
     // 新增：侧边栏相关元素
     const toggleSidePanelButton = document.getElementById('toggleSidePanelButton');
     const sidePanel = document.querySelector('.side-panel');
+
+    // 错误提示元素
+    const errorMessage = document.getElementById('errorMessage');
 
     // === 内部状态变量 ===
     let currentDevices = []; 
@@ -36,6 +95,37 @@ document.addEventListener('DOMContentLoaded', () => {
     // 新增：侧边栏状态
     let isSidePanelCollapsed = false; 
     const SIDE_PANEL_STATE_KEY = 'probe_tool_side_panel_collapsed'; 
+
+    // === 辅助函数 ===
+    // 防抖函数
+    function debounce(func, wait) {
+        let timeout;
+        return function(...args) {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), wait);
+        };
+    }
+
+    // 显示错误消息
+    function showError(message) {
+        errorMessage.innerHTML = `
+            <span>${message}</span>
+            <button class="close-btn" aria-label="Close error message">&times;</button>
+        `;
+        errorMessage.style.display = 'block';
+        
+        // 为关闭按钮添加事件监听器
+        const closeBtn = errorMessage.querySelector('.close-btn');
+        closeBtn.addEventListener('click', () => {
+            errorMessage.style.display = 'none';
+        });
+        
+        // 3秒后自动隐藏错误消息
+        setTimeout(() => {
+            errorMessage.style.display = 'none';
+        }, 3000);
+    }
+
 
     // === WebSocket 变量 (修改为 let 以便重连时重新赋值) ===
     let wsDevices = null;
@@ -100,15 +190,29 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (message.data.startsWith('CMD_RESP from')) {
                         logLine.className = 'command-response'; 
                     }
+                    // 转义HTML特殊字符以防止XSS
                     logLine.textContent = message.data;
                     
                     const scrollTolerance = 5; 
                     const isScrolledToBottom = (logOutput.scrollHeight - logOutput.clientHeight) <= (logOutput.scrollTop + scrollTolerance);
 
+                    // 优化：限制日志行数，防止内存泄漏
+                    if (logOutput.children.length > 1000) {
+                        logOutput.removeChild(logOutput.firstChild);
+                    }
+                    
                     logOutput.appendChild(logLine); 
 
                     if (isScrolledToBottom) {
-                        logOutput.scrollTop = logOutput.scrollHeight;
+                        // On mobile devices, ensure smooth scrolling to bottom
+                        if (window.innerWidth <= 768) {
+                            // Use requestAnimationFrame for smoother mobile scrolling
+                            requestAnimationFrame(() => {
+                                logOutput.scrollTop = logOutput.scrollHeight;
+                            });
+                        } else {
+                            logOutput.scrollTop = logOutput.scrollHeight;
+                        }
                     }
                 }
             } catch (e) {
@@ -228,9 +332,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const selectedDevice = currentDevices.find(d => d.ip === selectedIp);
         const isConnected = selectedDevice && selectedDevice.status === 'Connected';
 
-        connectButton.disabled = !selectedIp || isConnected;
-        disconnectButton.disabled = !selectedIp || !isConnected;
-        sendCommandButton.disabled = !isConnected; 
+        updateButtonStates({
+            'connectButton': !selectedIp || isConnected,
+            'disconnectButton': !selectedIp || !isConnected,
+            'sendCommandButton': !isConnected
+        });
+
+        // 当设备连接成功时，自动聚焦到命令输入框
+        if (isConnected) {
+            commandInput.focus();
+        }
 
         if (isConnected && selectedDevice.connected_via) {
             connectionInfo.textContent = `Via Local IP: ${selectedDevice.connected_via}`;
@@ -244,14 +355,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateScannerButtons() {
-        startScannerButton.disabled = scannerIsRunning;
-        stopScannerButton.disabled = !scannerIsRunning;
-        scanButton.disabled = scannerIsRunning; 
+        updateButtonStates({
+            'startScannerButton': scannerIsRunning,
+            'stopScannerButton': !scannerIsRunning,
+            'scanButton': scannerIsRunning
+        });
     }
 
     function updateLogServerButtons() {
-        startLogButton.disabled = logServerIsRunning;
-        stopLogButton.disabled = !logServerIsRunning;
+        updateButtonStates({
+            'startLogButton': logServerIsRunning,
+            'stopLogButton': !logServerIsRunning
+        });
     }
 
     function updateDeviceList(devices) {
@@ -351,6 +466,25 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // === Event Listeners ===
+    
+    // 添加键盘快捷键支持
+    document.addEventListener('keydown', (event) => {
+        // Ctrl+Enter 发送命令
+        if (event.ctrlKey && event.key === 'Enter' && !sendCommandButton.disabled) {
+            event.preventDefault();
+            sendCommandButton.click();
+        }
+        
+        // Escape键关闭模态框和错误提示
+        if (event.key === 'Escape') {
+            if (confirmDialog.style.display === 'flex') {
+                confirmDialog.style.display = 'none';
+            }
+            if (errorMessage.style.display === 'block') {
+                errorMessage.style.display = 'none';
+            }
+        }
+    });
 
     startScannerButton.addEventListener('click', async () => {
         startScannerButton.disabled = true; 
@@ -359,14 +493,16 @@ document.addEventListener('DOMContentLoaded', () => {
         currentDevices = []; 
 
         try {
-            const response = await fetch('/api/scanner/start', { method: 'POST' });
-            const data = await response.json();
+            const data = await apiRequest('/api/scanner/start', { method: 'POST' }, scannerLoadingIndicator);
             if (data.status === 'scanner_started' || data.status === 'scanner_already_running') {
                 scannerIsRunning = true;
+            } else {
+                throw new Error(data.message || 'Failed to start scanner');
             }
         } catch (error) {
             console.error('JS ERROR: Error starting continuous scanner:', error);
             deviceList.innerHTML = '<li>Error starting scanner.</li>'; 
+            showError('Failed to start device scanner: ' + error.message);
         } finally {
             updateScannerButtons(); 
         }
@@ -375,13 +511,15 @@ document.addEventListener('DOMContentLoaded', () => {
     stopScannerButton.addEventListener('click', async () => {
         stopScannerButton.disabled = true; 
         try {
-            const response = await fetch('/api/scanner/stop', { method: 'POST' });
-            const data = await response.json();
+            const data = await apiRequest('/api/scanner/stop', { method: 'POST' }, scannerLoadingIndicator);
             if (data.status === 'scanner_stopped' || data.status === 'scanner_not_running') {
                 scannerIsRunning = false;
+            } else {
+                throw new Error(data.message || 'Failed to stop scanner');
             }
         } catch (error) {
             console.error('JS ERROR: Error stopping continuous scanner:', error);
+            showError('Failed to stop device scanner: ' + error.message);
         } finally {
             updateScannerButtons(); 
         }
@@ -394,10 +532,11 @@ document.addEventListener('DOMContentLoaded', () => {
         currentDevices = []; 
 
         try {
-            const response = await fetch('/api/scan', { method: 'POST' });
+            await apiRequest('/api/scan', { method: 'POST' }, scannerLoadingIndicator);
         } catch (error) {
             console.error('JS ERROR: Error initiating device list refresh:', error);
             deviceList.innerHTML = '<li>Error initiating scan.</li>'; 
+            showError('Failed to initiate device scan: ' + error.message);
         } finally {
             scanButton.disabled = scannerIsRunning; 
         }
@@ -410,28 +549,31 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!ip) return; 
         connectButton.disabled = true; 
         try {
-            await fetch('/api/connect', {
+            await apiRequest('/api/connect', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ip })
-            });
+            }, connectionLoadingIndicator);
         } catch (error) {
             console.error(`JS ERROR: Error connecting to ${ip}:`, error);
+            showError(`Failed to connect to device ${ip}: ` + error.message);
         }
     });
 
     disconnectButton.addEventListener('click', async () => {
         const ip = deviceSelect.value;
         if (!ip) return; 
+        
         disconnectButton.disabled = true; 
         try {
-            await fetch('/api/disconnect', {
+            await apiRequest('/api/disconnect', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ip })
-            });
+            }, connectionLoadingIndicator);
         } catch (error) {
             console.error(`JS ERROR: Error disconnecting from ${ip}:`, error);
+            showError(`Failed to disconnect from device ${ip}: ` + error.message);
         }
     });
 
@@ -441,7 +583,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!ip || !text) return; 
 
         addCommandToHistory(text);
-
         sendCommandButton.disabled = true; 
         
         let fnToSend = 0; 
@@ -456,13 +597,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const dataToSendBase64 = btoa(unescape(encodeURIComponent(dataToSendRaw)));
 
         try {
-            await fetch('/api/send', {
+            await apiRequest('/api/send', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ip, fn: fnToSend, stage: stageToSend, data_base64: dataToSendBase64 })
-            });
+            }, commandSendingIndicator);
+            
+            // 清空输入框
+            commandInput.value = '';
         } catch (error) {
             console.error(`JS ERROR: Error sending command:`, error);
+            showError('Failed to send command: ' + error.message);
         } finally {
             sendCommandButton.disabled = false; 
         }
@@ -480,13 +625,15 @@ document.addEventListener('DOMContentLoaded', () => {
     startLogButton.addEventListener('click', async () => {
         startLogButton.disabled = true; 
         try {
-            const response = await fetch('/api/log/start', { method: 'POST' });
-            const data = await response.json();
+            const data = await apiRequest('/api/log/start', { method: 'POST' }, logLoadingIndicator);
             if (data.status === 'started' || data.status === 'already_running') {
                 logServerIsRunning = true; 
+            } else {
+                throw new Error(data.message || 'Failed to start log server');
             }
         } catch (error) {
             console.error('JS ERROR: Error starting log server:', error);
+            showError('Failed to start log server: ' + error.message);
         } finally {
             updateLogServerButtons(); 
         }
@@ -495,13 +642,15 @@ document.addEventListener('DOMContentLoaded', () => {
     stopLogButton.addEventListener('click', async () => {
         stopLogButton.disabled = true; 
         try {
-            const response = await fetch('/api/log/stop', { method: 'POST' });
-            const data = await response.json();
+            const data = await apiRequest('/api/log/stop', { method: 'POST' }, logLoadingIndicator);
             if (data.status === 'stopped' || data.status === 'not_running') {
                 logServerIsRunning = false; 
+            } else {
+                throw new Error(data.message || 'Failed to stop log server');
             }
         } catch (error) {
             console.error('JS ERROR: Error stopping log server:', error);
+            showError('Failed to stop log server: ' + error.message);
         } finally {
             updateLogServerButtons(); 
         }
@@ -510,6 +659,31 @@ document.addEventListener('DOMContentLoaded', () => {
     clearLogButton.addEventListener('click', () => {
         logOutput.innerHTML = ''; 
     });
+    
+    // Improve mobile touch scrolling for log area
+    let touchStartY = 0;
+    logOutput.addEventListener('touchstart', (e) => {
+        touchStartY = e.touches[0].clientY;
+    }, { passive: true });
+    
+    logOutput.addEventListener('touchmove', (e) => {
+        const touchY = e.touches[0].clientY;
+        const scrollTop = logOutput.scrollTop;
+        const scrollHeight = logOutput.scrollHeight;
+        const clientHeight = logOutput.clientHeight;
+        
+        // Allow native scrolling when content overflows
+        if (scrollHeight > clientHeight) {
+            // Prevent pull-to-refresh interference at top
+            if (scrollTop === 0 && touchY > touchStartY) {
+                e.preventDefault();
+            }
+            // Prevent pull-to-refresh interference at bottom
+            else if (scrollTop + clientHeight >= scrollHeight && touchY < touchStartY) {
+                e.preventDefault();
+            }
+        }
+    }, { passive: false });
 
     // 新增：侧边栏切换按钮的事件监听器
     toggleSidePanelButton.addEventListener('click', () => {
@@ -523,4 +697,24 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchScannerStatus(); 
     fetchLogServerStatus(); 
     loadSidePanelState(); // 页面加载时加载侧边栏状态
+    
+    // 添加窗口大小变化的防抖处理
+    const handleResize = debounce(() => {
+        // 在窗口大小变化时重新计算布局
+        if (logOutput.scrollHeight - logOutput.clientHeight <= logOutput.scrollTop + 5) {
+            logOutput.scrollTop = logOutput.scrollHeight;
+        }
+        
+        // Mobile-specific adjustments
+        if (window.innerWidth <= 768) {
+            // Force scroll to bottom on mobile resize if near bottom
+            if (logOutput.scrollHeight - logOutput.clientHeight <= logOutput.scrollTop + 20) {
+                setTimeout(() => {
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                }, 100);
+            }
+        }
+    }, 250);
+    
+    window.addEventListener('resize', handleResize);
 });
