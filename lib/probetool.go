@@ -60,6 +60,25 @@ func CalcCRC8(data []byte) uint8 {
 	return crc
 }
 
+// encodeHeader encodes the packet header efficiently
+func encodeHeader(magic, totalSize, dataSize, dataOffset uint32, crc uint8) []byte {
+	header := make([]byte, HeaderSize)
+	binary.LittleEndian.PutUint32(header[0:4], magic)
+	binary.LittleEndian.PutUint32(header[4:8], totalSize)
+	binary.LittleEndian.PutUint32(header[8:12], dataSize)
+	binary.LittleEndian.PutUint32(header[12:16], dataOffset)
+	header[16] = crc
+	return header
+}
+
+// encodePayloadInfo encodes the payload info efficiently
+func encodePayloadInfo(fn, stage uint32) []byte {
+	payloadInfo := make([]byte, PayloadInfoSize)
+	binary.LittleEndian.PutUint32(payloadInfo[0:4], fn)
+	binary.LittleEndian.PutUint32(payloadInfo[4:8], stage)
+	return payloadInfo
+}
+
 // EncodeRequest now returns a slice of byte slices, representing multiple packets if fragmentation is needed.
 func EncodeRequest(fn uint32, stage uint32, data []byte) [][]byte {
 	var packets [][]byte
@@ -67,27 +86,25 @@ func EncodeRequest(fn uint32, stage uint32, data []byte) [][]byte {
 
 	// If data is empty or fits within a single fragment payload, send it as one packet.
 	if totalDataSize == 0 || totalDataSize <= MaxFragmentPayloadSize {
-		payloadBuf := new(bytes.Buffer)
-		binary.Write(payloadBuf, binary.LittleEndian, fn)
-		binary.Write(payloadBuf, binary.LittleEndian, stage)
-		payloadBytes := payloadBuf.Bytes() // This is `payload_info_t`
-
+		payloadBytes := encodePayloadInfo(fn, stage)
 		crcData := append(payloadBytes, data...)
 		crc := CalcCRC8(crcData)
 
-		headerBuf := new(bytes.Buffer)
-		binary.Write(headerBuf, binary.LittleEndian, uint32(DefaultRequestMagic))
-		binary.Write(headerBuf, binary.LittleEndian, totalDataSize) // total_size is the full data size
-		binary.Write(headerBuf, binary.LittleEndian, totalDataSize) // data_size for this fragment
-		binary.Write(headerBuf, binary.LittleEndian, uint32(0))     // data_offset is 0 for a single packet
-		binary.Write(headerBuf, binary.LittleEndian, crc)
+		header := encodeHeader(DefaultRequestMagic, totalDataSize, totalDataSize, 0, crc)
 
-		packets = append(packets, append(append(headerBuf.Bytes(), payloadBytes...), data...))
+		packet := make([]byte, 0, len(header)+len(payloadBytes)+len(data))
+		packet = append(packet, header...)
+		packet = append(packet, payloadBytes...)
+		packet = append(packet, data...)
+
+		packets = append(packets, packet)
 		return packets
 	}
 
 	// Fragmentation is needed
 	var offset uint32 = 0
+	payloadBytes := encodePayloadInfo(fn, stage)
+
 	for offset < totalDataSize {
 		currentFragmentSize := uint32(MaxFragmentPayloadSize)
 		if offset+currentFragmentSize > totalDataSize {
@@ -96,22 +113,16 @@ func EncodeRequest(fn uint32, stage uint32, data []byte) [][]byte {
 
 		fragmentData := data[offset : offset+currentFragmentSize]
 
-		payloadBuf := new(bytes.Buffer)
-		binary.Write(payloadBuf, binary.LittleEndian, fn)
-		binary.Write(payloadBuf, binary.LittleEndian, stage)
-		payloadBytes := payloadBuf.Bytes() // This is `payload_info_t`
-
 		crcData := append(payloadBytes, fragmentData...)
 		crc := CalcCRC8(crcData)
 
-		headerBuf := new(bytes.Buffer)
-		binary.Write(headerBuf, binary.LittleEndian, uint32(DefaultRequestMagic))
-		binary.Write(headerBuf, binary.LittleEndian, totalDataSize)       // total_size for the whole logical message
-		binary.Write(headerBuf, binary.LittleEndian, currentFragmentSize) // data_size for this specific fragment
-		binary.Write(headerBuf, binary.LittleEndian, offset)              // data_offset for this specific fragment
-		binary.Write(headerBuf, binary.LittleEndian, crc)
+		header := encodeHeader(DefaultRequestMagic, totalDataSize, currentFragmentSize, offset, crc)
 
-		packet := append(append(headerBuf.Bytes(), payloadBytes...), fragmentData...)
+		packet := make([]byte, 0, len(header)+len(payloadBytes)+len(fragmentData))
+		packet = append(packet, header...)
+		packet = append(packet, payloadBytes...)
+		packet = append(packet, fragmentData...)
+
 		packets = append(packets, packet)
 
 		offset += currentFragmentSize
@@ -124,24 +135,48 @@ func DecodeRequest(buffer []byte) (map[string]interface{}, uint32, uint32, uint3
 	if len(buffer) < RequestTSize {
 		return nil, 0, 0, 0, nil, fmt.Errorf("incomplete buffer, length %d < %d", len(buffer), RequestTSize)
 	}
+
 	headerBytes := buffer[:HeaderSize]
 	payloadInfoBytes := buffer[HeaderSize:RequestTSize]
 
 	var magic, totalSize, dataSize, dataOffset uint32
 	var crcReceived uint8
+
+	// Use a single reader for efficiency
 	reader := bytes.NewReader(headerBytes)
-	binary.Read(reader, binary.LittleEndian, &magic)
-	binary.Read(reader, binary.LittleEndian, &totalSize)
-	binary.Read(reader, binary.LittleEndian, &dataSize)
-	binary.Read(reader, binary.LittleEndian, &dataOffset)
-	binary.Read(reader, binary.LittleEndian, &crcReceived)
+	if err := binary.Read(reader, binary.LittleEndian, &magic); err != nil {
+		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read magic: %v", err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &totalSize); err != nil {
+		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read totalSize: %v", err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &dataSize); err != nil {
+		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read dataSize: %v", err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &dataOffset); err != nil {
+		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read dataOffset: %v", err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &crcReceived); err != nil {
+		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read crc: %v", err)
+	}
 
 	if magic != DefaultRequestMagic {
 		return nil, 0, 0, 0, nil, fmt.Errorf("invalid magic 0x%x, expected 0x%x", magic, uint32(DefaultRequestMagic))
 	}
+
+	// Input validation to prevent potential attacks
+	if dataSize > MaxFragmentPayloadSize {
+		return nil, 0, 0, 0, nil, fmt.Errorf("dataSize too large: %d, max allowed: %d", dataSize, MaxFragmentPayloadSize)
+	}
+
+	if totalSize > 1024*1024 { // Limit total message size to 1MB to prevent memory exhaustion
+		return nil, 0, 0, 0, nil, fmt.Errorf("totalSize too large: %d, max allowed: %d", totalSize, 1024*1024)
+	}
+
 	if len(buffer) < int(RequestTSize+dataSize) {
 		return nil, 0, 0, 0, nil, fmt.Errorf("incomplete data payload (expected %d bytes, got %d in buffer after header)", dataSize, len(buffer)-RequestTSize)
 	}
+
 	if totalSize > 0 && dataOffset+dataSize > totalSize {
 		return nil, 0, 0, 0, nil, fmt.Errorf("fragment range out of total bounds: offset %d, size %d, total %d", dataOffset, dataSize, totalSize)
 	}
@@ -154,8 +189,12 @@ func DecodeRequest(buffer []byte) (map[string]interface{}, uint32, uint32, uint3
 
 	var fn, stage uint32
 	payloadReader := bytes.NewReader(payloadInfoBytes)
-	binary.Read(payloadReader, binary.LittleEndian, &fn)
-	binary.Read(payloadReader, binary.LittleEndian, &stage)
+	if err := binary.Read(payloadReader, binary.LittleEndian, &fn); err != nil {
+		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read fn: %v", err)
+	}
+	if err := binary.Read(payloadReader, binary.LittleEndian, &stage); err != nil {
+		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read stage: %v", err)
+	}
 
 	return map[string]interface{}{"fn": fn, "stage": stage}, totalSize, dataSize, dataOffset, actualDataBytes, nil
 }
@@ -170,7 +209,7 @@ type PartialMessage struct {
 	Stage          uint32
 	TotalSize      uint32
 	ReceivedData   []byte // The buffer to reconstruct the full message
-	ReceivedMask   []bool // To track if all segments have been received (true if received)
+	ReceivedMask   []byte // Bitmask to track if all segments have been received (each bit represents 1 byte)
 	LastUpdateTime time.Time
 	mu             sync.Mutex // Mutex to protect access to this partial message
 }
@@ -178,7 +217,7 @@ type PartialMessage struct {
 // Reassembler manages reassembly buffer for a single logical message stream (per connection).
 type Reassembler struct {
 	currentMessage  *PartialMessage // The current message being reassembled
-	mu              sync.Mutex      // Mutex to protect currentMessage
+	mu              sync.RWMutex    // RWMutex to allow concurrent read access when no modification occurs
 	timeout         time.Duration   // Timeout for incomplete messages
 	cleanupTicker   *time.Ticker    // For periodic cleanup
 	stopCleanupChan chan struct{}   // To stop cleanup goroutine
@@ -188,7 +227,7 @@ type Reassembler struct {
 // It also starts a background cleanup routine.
 func NewReassembler(timeout time.Duration) *Reassembler {
 	r := &Reassembler{
-		currentMessage:  nil, // Initially no message is being reassembled
+		currentMessage:  nil, // Initially no message is being reassembler
 		timeout:         timeout,
 		cleanupTicker:   time.NewTicker(timeout / 2), // Check periodically, half the timeout duration
 		stopCleanupChan: make(chan struct{}),
@@ -203,17 +242,24 @@ func (r *Reassembler) cleanupRoutine() {
 	for {
 		select {
 		case <-r.cleanupTicker.C:
-			r.mu.Lock() // Lock Reassembler instance
-			if r.currentMessage != nil {
-				r.currentMessage.mu.Lock() // Lock current message
-				if time.Since(r.currentMessage.LastUpdateTime) > r.timeout {
+			r.mu.RLock() // Use read lock initially to check if there's a message
+			currentMsg := r.currentMessage
+			r.mu.RUnlock()
+
+			if currentMsg != nil {
+				currentMsg.mu.Lock() // Lock the message first
+				r.mu.Lock() // Then lock the reassembler to safely access currentMessage
+
+				// Double-check that the message hasn't changed while acquiring locks
+				if r.currentMessage == currentMsg && time.Since(currentMsg.LastUpdateTime) > r.timeout {
 					log.Printf("Reassembler: Cleaning up timed out partial message (fn: %d, stage: %d, totalSize: %d)",
-						r.currentMessage.Fn, r.currentMessage.Stage, r.currentMessage.TotalSize)
+						currentMsg.Fn, currentMsg.Stage, currentMsg.TotalSize)
 					r.currentMessage = nil // Clear the timed-out message
 				}
-				r.currentMessage.mu.Unlock() // Unlock current message
+
+				r.mu.Unlock() // Unlock reassembler
+				currentMsg.mu.Unlock() // Unlock message
 			}
-			r.mu.Unlock() // Unlock Reassembler instance
 		case <-r.stopCleanupChan:
 			return
 		}
@@ -238,6 +284,25 @@ func (r *Reassembler) Clear() {
 	}
 }
 
+// Helper functions for bitmask operations
+func getBit(mask []byte, index uint32) bool {
+	byteIndex := index / 8
+	bitIndex := index % 8
+	if byteIndex >= uint32(len(mask)) {
+		return false
+	}
+	return (mask[byteIndex] & (1 << bitIndex)) != 0
+}
+
+func setBit(mask []byte, index uint32) {
+	byteIndex := index / 8
+	bitIndex := index % 8
+	if byteIndex >= uint32(len(mask)) {
+		return
+	}
+	mask[byteIndex] |= (1 << bitIndex)
+}
+
 // AddFragment adds a received fragment to the reassembly buffer.
 // It returns the fully reassembled message if complete, otherwise nil.
 // It also returns an error if something goes wrong (e.g., mismatched totalSize for an existing message).
@@ -251,12 +316,14 @@ func (r *Reassembler) AddFragment(ip string, fn, stage, totalSize, dataSize, dat
 			r.mu.Unlock()
 			return []byte{}, nil
 		}
+		// Calculate the number of bytes needed for the bitmask
+		maskSize := (totalSize + 7) / 8 // Round up to nearest byte
 		pm = &PartialMessage{
 			Fn:             fn,
 			Stage:          stage,
 			TotalSize:      totalSize,
 			ReceivedData:   make([]byte, totalSize),
-			ReceivedMask:   make([]bool, totalSize),
+			ReceivedMask:   make([]byte, maskSize),
 			LastUpdateTime: time.Now(),
 		}
 		r.currentMessage = pm // Set as the current message being reassembled
@@ -276,11 +343,12 @@ func (r *Reassembler) AddFragment(ip string, fn, stage, totalSize, dataSize, dat
 		log.Printf("Reassembler for %s: Clearing old partial message due to new sequence. Old: fn=%d,stage=%d,total=%d. New: fn=%d,stage=%d,total=%d",
 			ip, pm.Fn, pm.Stage, pm.TotalSize, fn, stage, totalSize)
 		// Clear the old message and initialize for the new one
+		maskSize := (totalSize + 7) / 8 // Round up to nearest byte
 		pm.Fn = fn
 		pm.Stage = stage
 		pm.TotalSize = totalSize
 		pm.ReceivedData = make([]byte, totalSize)
-		pm.ReceivedMask = make([]bool, totalSize)
+		pm.ReceivedMask = make([]byte, maskSize)
 	} else if pm.TotalSize != totalSize {
 		return nil, fmt.Errorf("reassembler for %s: total size mismatch. Existing: %d, New fragment: %d", ip, pm.TotalSize, totalSize)
 	}
@@ -293,17 +361,17 @@ func (r *Reassembler) AddFragment(ip string, fn, stage, totalSize, dataSize, dat
 	// Copy fragment data into the correct position in the reassembly buffer
 	copy(pm.ReceivedData[dataOffset:dataOffset+dataSize], fragmentData)
 	for i := uint32(0); i < dataSize; i++ {
-		if dataOffset+i < uint32(len(pm.ReceivedMask)) { // Boundary check
-			pm.ReceivedMask[dataOffset+i] = true // Mark these bytes as received
+		if dataOffset+i < pm.TotalSize { // Boundary check
+			setBit(pm.ReceivedMask, dataOffset+i) // Mark these bytes as received
 		} else {
-			log.Printf("Reassembler for %s: ReceivedMask out of bounds at offset %d, totalSize %d", ip, dataOffset+i, totalSize)
+			log.Printf("Reassembler for %s: ReceivedMask out of bounds at offset %d, totalSize %d", ip, dataOffset+i, pm.TotalSize)
 		}
 	}
 
 	// Check if the entire message is now complete
 	isComplete := true
-	for _, received := range pm.ReceivedMask {
-		if !received {
+	for i := uint32(0); i < pm.TotalSize; i++ {
+		if !getBit(pm.ReceivedMask, i) {
 			isComplete = false
 			break
 		}
@@ -650,17 +718,49 @@ func (s *ServerState) RunUdpListener(stopChan chan struct{}) {
 				log.Printf("Scanner read error: %v", err)
 				continue
 			}
+
+			// Validate IP address
 			ip := remoteAddr.IP.String()
+			if net.ParseIP(ip) == nil {
+				log.Printf("Invalid IP received: %s", ip)
+				continue
+			}
+
 			data := buf[:n]
+			// Find null terminator and truncate if found
 			if idx := bytes.IndexByte(data, 0); idx != -1 {
 				data = data[:idx]
 			}
+
+			// Validate and sanitize the ID string
 			id := strings.TrimSpace(string(data))
+			if len(id) > 255 { // Limit ID length to prevent potential abuse
+				id = id[:255]
+			}
+
+			// Sanitize ID to remove potentially harmful characters
+			id = sanitizeDeviceID(id)
 
 			s.UpdateDevice(ip, id)
 			go s.PushDevicesSnapshot() // Push updates to clients
 		}
 	}
+}
+
+// sanitizeDeviceID removes potentially harmful characters from device IDs
+func sanitizeDeviceID(id string) string {
+	var sanitized strings.Builder
+	for _, r := range id {
+		// Only allow alphanumeric characters, spaces, hyphens, underscores
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+		   r == ' ' || r == '-' || r == '_' || r == '.' {
+			sanitized.WriteRune(r)
+		} else {
+			// Replace other characters with underscore
+			sanitized.WriteRune('_')
+		}
+	}
+	return sanitized.String()
 }
 
 // StartContinuousScanner starts the continuous UDP broadcast scanner.
@@ -852,12 +952,16 @@ func (s *ServerState) DisconnectFromDevice(ip string) {
 	delete(s.Connections, ip)
 	s.ConnectionsLock.Unlock()
 
-	close(dc.StopChan)
-	dc.Conn.Close()
-	dc.WG.Wait()
-	// When connection is closed, clean up its Reassembler to avoid resource leaks
-	dc.Reassembler.StopCleanup() // Stop background cleanup goroutine
-	dc.Reassembler.Clear()       // Clear any potentially incomplete messages
+	if dc != nil {
+		close(dc.StopChan)
+		dc.Conn.Close()
+		dc.WG.Wait()
+		// When connection is closed, clean up its Reassembler to avoid resource leaks
+		if dc.Reassembler != nil {
+			dc.Reassembler.Clear()       // Clear any potentially incomplete messages
+			dc.Reassembler.StopCleanup() // Stop background cleanup goroutine
+		}
+	}
 
 	s.DevicesLock.Lock()
 	if dev, ok := s.Devices[ip]; ok {

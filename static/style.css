@@ -179,12 +179,12 @@ header h1 {
 /* 历史记录 */
 .history-list {
     position: absolute;
-    bottom: 100%; 
+    bottom: 100%;
     left: 0;
     right: 0;
     background-color: white;
     border: 1px solid #ccc;
-    border-bottom: none; 
+    border-bottom: none;
     border-radius: 4px 4px 0 0;
     list-style: none;
     padding: 0;
@@ -192,11 +192,11 @@ header h1 {
     max-height: 150px;
     overflow-y: auto;
     box-shadow: 0 -2px 10px rgba(0,0,0,0.1);
-    z-index: 2000; 
+    z-index: 2000;
 }
 
 .history-list li {
-    padding: 10px; 
+    padding: 10px;
     border-bottom: 1px solid #eee;
     cursor: pointer;
     display: flex;
@@ -339,7 +339,7 @@ button:focus, input:focus, select:focus {
         width: 90%;
         padding: 15px;
     }
-    
+
     /* 1. 改变布局方向 */
     .content-area {
         flex-direction: column;
@@ -347,11 +347,11 @@ button:focus, input:focus, select:focus {
         /* 使用 env() 函数更好地适配不同设备 */
         padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
     }
-    
+
     .button-group {
         flex-wrap: nowrap;
     }
-    
+
     .button-group .loading-indicator {
         height: 44px;
         line-height: 44px;
@@ -368,7 +368,7 @@ button:focus, input:focus, select:focus {
         /* 添加平滑展开/收起动画 */
         transition: max-height 0.3s ease, padding 0.3s ease;
     }
-    
+
     /* 新增: 移动端侧边栏收起时的样式 */
     .side-panel.collapsed {
         max-height: 0; /* 收起时高度为0 */
@@ -386,7 +386,7 @@ button:focus, input:focus, select:focus {
         /* 确保在移动设备上有足够的最小高度 */
         min-height: 200px;
     }
-    
+
     /* 改进日志显示区域在移动端的表现 */
     .log-area {
         font-size: 0.9rem; /* 稍微增大字体提高可读性 */
@@ -413,23 +413,76 @@ button:focus, input:focus, select:focus {
         transition: transform 0.3s ease;
     }
 
-    /* 5. 增大触控尺寸 */
+    /* 5. 触控尺寸优化 - 增强大小屏差异 */
     button, select, input[type="text"] {
-        height: 44px;
-        font-size: 16px;
+        height: clamp(32px, 6vw + 24px, 52px); /* 增大系数，增强大小屏差异 */
+        font-size: clamp(13px, 1.8vw + 12px, 20px); /* 增大系数，增强大小屏差异 */
     }
-    
-    .small-button { height: 32px; }
-    
+
+    .small-button {
+        height: clamp(26px, 4.5vw + 18px, 40px); /* 增大系数，增强大小屏差异 */
+    }
+
     /* 移动端Header中的切换按钮样式调整 */
     .header-toggle-button {
-        height: 44px; /* 适应移动端触控尺寸 */
-        font-size: 1rem;
+        height: clamp(32px, 6vw + 24px, 48px); /* 增大系数，增强大小屏差异 */
+        font-size: clamp(13px, 1.8vw + 12px, 18px); /* 增大系数，增强大小屏差异 */
     }
 
     /* 隐藏标题节省空间 */
     .command-section h3 { display: none; }
-    
+
     /* 调整设备列表高度 */
     #deviceList { height: 80px; }
+}
+
+/* =========================================
+   === 小屏幕适配 (Small Screens) ===
+   ========================================= */
+@media (max-width: 480px) {
+    /* 优化触控尺寸，适应小屏幕 */
+    button, select, input[type="text"] {
+        height: 36px; /* 进一步减小高度 */
+        font-size: 14px; /* 进一步减小字体 */
+        padding: 0 6px; /* 进一步减少内边距 */
+    }
+
+    .small-button {
+        height: 26px;
+        font-size: 13px;
+    }
+
+    .header-toggle-button {
+        height: 36px;
+        font-size: 0.85rem;
+    }
+
+    /* 特定按钮进一步缩小 */
+    #startScannerButton, #stopScannerButton, #scanButton, #toggleSidePanelButton {
+        height: 32px;
+        font-size: 12px;
+        padding: 0 6px;
+    }
+
+    /* 调整按钮组布局 */
+    .button-group {
+        gap: 3px; /* 进一步减少按钮间距 */
+        flex-wrap: wrap; /* 允许换行 */
+    }
+
+    /* 调整内容区域 */
+    .log-area {
+        min-height: 100px;
+        font-size: 0.8rem;
+        padding: 4px;
+    }
+
+    #deviceList {
+        height: 50px;
+        font-size: 0.75rem;
+    }
+
+    .side-panel {
+        max-height: 150px;
+    }
 }

@@ -136,26 +136,37 @@ document.addEventListener('DOMContentLoaded', () => {
     const wsUrl = `${wsProtocol}//${window.location.hostname}:8001`;
 
     // === WebSocket 连接函数 ===
-    
+
+    // 添加防抖功能，避免频繁更新设备列表
+    const debouncedUpdateDeviceUI = debounce(() => {
+        updateDeviceList(currentDevices);
+        updateDeviceSelect(currentDevices);
+    }, 200); // 200ms防抖延迟
+
     function connectDeviceWebSocket() {
         console.log('JS DEBUG: Attempting to connect Device WebSocket...');
         wsDevices = new WebSocket(wsUrl);
 
         wsDevices.onopen = () => {
             console.log('JS DEBUG: Connected to Device WebSocket. Sending registration...');
-            wsDevices.send(JSON.stringify({ type: 'devices' })); 
-            fetchScannerStatus(); 
-            fetchLogServerStatus(); 
+            wsDevices.send(JSON.stringify({ type: 'devices' }));
+            fetchScannerStatus();
+            fetchLogServerStatus();
         };
 
         wsDevices.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
                 if (message.type === 'devices') {
-                    currentDevices = message.data;
-                    updateDeviceList(currentDevices); 
-                    updateDeviceSelect(currentDevices);
-                } else if (message.type === 'info') { 
+                    const newDevices = message.data;
+
+                    // 检查设备列表是否有实际变化，避免不必要的UI更新
+                    const hasChanges = JSON.stringify(currentDevices) !== JSON.stringify(newDevices);
+                    if (hasChanges) {
+                        currentDevices = newDevices;
+                        debouncedUpdateDeviceUI();
+                    }
+                } else if (message.type === 'info') {
                     console.info('JS INFO: Device WS Info:', message.data);
                 }
             } catch (e) {
@@ -270,7 +281,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function deleteHistoryItem(e, index) {
-        e.stopPropagation(); 
+        e.stopPropagation();
         commandHistory.splice(index, 1);
         saveHistory();
         renderHistoryList();
@@ -288,19 +299,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
         commandHistory.forEach((cmd, index) => {
             const li = document.createElement('li');
-            
+
             const spanText = document.createElement('span');
             spanText.className = 'history-text';
             spanText.textContent = cmd;
-            
+
             li.addEventListener('click', () => {
                 commandInput.value = cmd;
-                commandHistoryList.style.display = 'none'; 
+                commandHistoryList.style.display = 'none';
             });
 
             const spanDelete = document.createElement('span');
             spanDelete.className = 'history-delete-btn';
-            spanDelete.innerHTML = '&times;'; 
+            spanDelete.innerHTML = '&times;';
             spanDelete.title = 'Remove from history';
             spanDelete.addEventListener('click', (e) => deleteHistoryItem(e, index));
 
@@ -312,17 +323,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadHistory();
 
-    commandInput.addEventListener('focus', () => {
+    commandInput.addEventListener('focus', (e) => {
+        // 输入框获得焦点时显示历史记录（如果有）
         if (commandHistory.length > 0) {
             renderHistoryList();
-            commandHistoryList.style.display = 'block';
+            commandHistoryList.style.display = 'block';  // 立即显示，然后可以添加其他效果
         }
+    });
+
+    commandInput.addEventListener('blur', (e) => {
+        // 延迟隐藏历史列表，让用户有机会点击历史项
+        setTimeout(() => {
+            // 检查当前焦点是否仍在输入框或历史列表上
+            if (!commandInput.contains(document.activeElement) &&
+                !commandHistoryList.contains(document.activeElement)) {
+                commandHistoryList.style.display = 'none';
+            }
+        }, 150); // 150ms延迟，允许用户点击历史项
     });
 
     document.addEventListener('click', (e) => {
         if (!commandInput.contains(e.target) && !commandHistoryList.contains(e.target)) {
             commandHistoryList.style.display = 'none';
         }
+    });
+
+    // 当用户选择历史项时
+    commandHistoryList.addEventListener('click', () => {
+        commandHistoryList.style.display = 'none';
     });
 
     // === UI 更新函数 ===
@@ -385,10 +413,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateDeviceSelect(devices) {
-        const selectedIp = deviceSelect.value; 
-        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>'; 
+        // 保存当前选中的值
+        const selectedIp = deviceSelect.value;
+
+        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>';
         if (!devices || devices.length === 0) {
-            updateDeviceControlButtons(); 
+            updateDeviceControlButtons();
             return;
         }
         devices.forEach(device => {
@@ -396,13 +426,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const option = document.createElement('option');
                 option.value = device.ip;
                 option.textContent = `${device.id} (${device.ip}) - ${device.status}`;
-                if (device.ip === selectedIp) { 
+                if (device.ip === selectedIp) {
                     option.selected = true;
                 }
                 deviceSelect.appendChild(option);
             }
         });
-        updateDeviceControlButtons(); 
+
+        // 如果之前有选中的设备仍然存在，则保持选中状态
+        if (selectedIp && devices.some(device => device.ip === selectedIp)) {
+            deviceSelect.value = selectedIp;
+        }
+
+        updateDeviceControlButtons();
     }
 
     async function fetchScannerStatus() {
