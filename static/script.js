@@ -1,7 +1,6 @@
 // ./static/script.js
 
 document.addEventListener('DOMContentLoaded', () => {
-    // === 通用工具函数 ===
     // 显示加载指示器
     function showLoading(element) {
         if (element) {
@@ -25,7 +24,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // 通用按钮状态更新函数
     function updateButtonStates(config) {
         Object.keys(config).forEach(buttonId => {
             const button = document.getElementById(buttonId);
@@ -35,7 +33,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // 通用API请求函数
     async function apiRequest(url, options = {}, loadingIndicator = null) {
         setLoadingState(loadingIndicator, true);
         try {
@@ -53,50 +50,42 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // === 获取所有前端元素 ===
-    // Device Discovery Section
     const startScannerButton = document.getElementById('startScannerButton');
     const stopScannerButton = document.getElementById('stopScannerButton');
-    const scanButton = document.getElementById('scanButton'); 
+    const scanButton = document.getElementById('scanButton');
     const deviceList = document.getElementById('deviceList');
     const scannerLoadingIndicator = document.getElementById('scannerLoadingIndicator');
 
-    // Device Control Section
     const deviceSelect = document.getElementById('deviceSelect');
     const connectButton = document.getElementById('connectButton');
     const disconnectButton = document.getElementById('disconnectButton');
     const connectionInfo = document.getElementById('connectionInfo');
     const connectionLoadingIndicator = document.getElementById('connectionLoadingIndicator');
-    
-    // Send Command (Text) Section
+
     const commandInput = document.getElementById('commandInput');
     const sendCommandButton = document.getElementById('sendCommandButton');
     const commandHistoryList = document.getElementById('commandHistoryList');
     const commandSendingIndicator = document.getElementById('commandSendingIndicator');
-    
-    // Log Stream Section
+
     const startLogButton = document.getElementById('startLogButton');
     const stopLogButton = document.getElementById('stopLogButton');
-    const clearLogButton = document.getElementById('clearLogButton'); 
+    const clearLogButton = document.getElementById('clearLogButton');
     const logOutput = document.getElementById('logOutput');
     const logLoadingIndicator = document.getElementById('logLoadingIndicator');
 
-    // 新增：侧边栏相关元素
     const toggleSidePanelButton = document.getElementById('toggleSidePanelButton');
     const sidePanel = document.querySelector('.side-panel');
 
-    // 错误提示元素
     const errorMessage = document.getElementById('errorMessage');
 
-    // === 内部状态变量 ===
-    let currentDevices = []; 
-    let scannerIsRunning = false; 
-    let logServerIsRunning = false; 
-    // 新增：侧边栏状态
-    let isSidePanelCollapsed = false; 
-    const SIDE_PANEL_STATE_KEY = 'probe_tool_side_panel_collapsed'; 
+    let currentDevices = [];
+    let scannerIsRunning = false;
+    let logServerIsRunning = false;
+    let isManualScanInProgress = false;
+    let isSingleScanInProgress = false;
+    let isSidePanelCollapsed = false;
+    const SIDE_PANEL_STATE_KEY = 'probe_tool_side_panel_collapsed';
 
-    // === 辅助函数 ===
     // 防抖函数
     function debounce(func, wait) {
         let timeout;
@@ -106,49 +95,43 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    // 显示错误消息
     function showError(message) {
         errorMessage.innerHTML = `
             <span>${message}</span>
             <button class="close-btn" aria-label="Close error message">&times;</button>
         `;
         errorMessage.style.display = 'block';
-        
-        // 为关闭按钮添加事件监听器
+
         const closeBtn = errorMessage.querySelector('.close-btn');
         closeBtn.addEventListener('click', () => {
             errorMessage.style.display = 'none';
         });
-        
-        // 3秒后自动隐藏错误消息
+
         setTimeout(() => {
             errorMessage.style.display = 'none';
         }, 3000);
     }
 
 
-    // === WebSocket 变量 (修改为 let 以便重连时重新赋值) ===
     let wsDevices = null;
     let wsLog = null;
-    const RECONNECT_DELAY = 3000; // 断开后3秒重连
+    const RECONNECT_DELAY = 3000;
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.hostname}:8001`;
 
-    // === WebSocket 连接函数 ===
-
-    // 添加防抖功能，避免频繁更新设备列表
     const debouncedUpdateDeviceUI = debounce(() => {
         updateDeviceList(currentDevices);
         updateDeviceSelect(currentDevices);
-    }, 200); // 200ms防抖延迟
+        updateDiscoveredDevicesCount(currentDevices.length);
+    }, 200);
 
     function connectDeviceWebSocket() {
-        console.log('JS DEBUG: Attempting to connect Device WebSocket...');
+        // Attempting to connect Device WebSocket...
         wsDevices = new WebSocket(wsUrl);
 
         wsDevices.onopen = () => {
-            console.log('JS DEBUG: Connected to Device WebSocket. Sending registration...');
+            // Connected to Device WebSocket. Sending registration...
             wsDevices.send(JSON.stringify({ type: 'devices' }));
             fetchScannerStatus();
             fetchLogServerStatus();
@@ -162,10 +145,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     // 检查设备列表是否有实际变化，避免不必要的UI更新
                     const hasChanges = JSON.stringify(currentDevices) !== JSON.stringify(newDevices);
-                    if (hasChanges) {
-                        currentDevices = newDevices;
+                    currentDevices = newDevices;
+
+                    if (isManualScanInProgress) {
+                        updateDeviceList(currentDevices);
+                        updateDeviceSelect(currentDevices);
+                        isManualScanInProgress = false;
+                    } else {
                         debouncedUpdateDeviceUI();
                     }
+
+                    if (isSingleScanInProgress && !scannerIsRunning) {
+                        isSingleScanInProgress = false;
+                    }
+
+                    updateScannerButtons();
                 } else if (message.type === 'info') {
                     console.info('JS INFO: Device WS Info:', message.data);
                 }
@@ -175,7 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         wsDevices.onclose = (event) => {
-            console.log(`JS DEBUG: Device WebSocket closed (Code: ${event.code}). Reconnecting in ${RECONNECT_DELAY}ms...`);
+            // Device WebSocket closed. Reconnecting...
             setTimeout(connectDeviceWebSocket, RECONNECT_DELAY);
         };
 
@@ -185,11 +179,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function connectLogWebSocket() {
-        console.log('JS DEBUG: Attempting to connect Log WebSocket...');
+        // Attempting to connect Log WebSocket...
         wsLog = new WebSocket(wsUrl);
 
         wsLog.onopen = () => {
-            console.log('JS DEBUG: Connected to Log WebSocket');
+            // Connected to Log WebSocket
             wsLog.send(JSON.stringify({ type: 'log' })); 
         };
 
@@ -232,7 +226,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         wsLog.onclose = (event) => {
-            console.log(`JS DEBUG: Log WebSocket disconnected. Reconnecting in ${RECONNECT_DELAY}ms...`);
+            // Log WebSocket disconnected. Reconnecting...
             setTimeout(connectLogWebSocket, RECONNECT_DELAY);
         };
 
@@ -384,9 +378,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateScannerButtons() {
         updateButtonStates({
-            'startScannerButton': scannerIsRunning,
-            'stopScannerButton': !scannerIsRunning,
-            'scanButton': scannerIsRunning
+            'startScannerButton': scannerIsRunning || isSingleScanInProgress,
+            'stopScannerButton': !scannerIsRunning || isSingleScanInProgress,
+            'scanButton': scannerIsRunning || isSingleScanInProgress
         });
     }
 
@@ -397,10 +391,19 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function updateDiscoveredDevicesCount(count) {
+        const countElement = document.getElementById('discoveredDevicesCount');
+        if (countElement) {
+            countElement.textContent = `${count} ${count === 1 ? 'device' : 'devices'}`;
+        }
+    }
+
     function updateDeviceList(devices) {
-        deviceList.innerHTML = ''; 
+        deviceList.innerHTML = '';
         if (!devices || devices.length === 0) {
-            deviceList.innerHTML = '<li>No devices found. Start scanner or click "Refresh Devices"</li>'; 
+            deviceList.innerHTML = '<li>No devices found. Start scanner or click "Refresh Devices"</li>';
+            // 更新设备计数
+            updateDiscoveredDevicesCount(0);
             return;
         }
         devices.forEach(device => {
@@ -410,6 +413,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 deviceList.appendChild(li);
             }
         });
+
+        // 更新设备计数
+        updateDiscoveredDevicesCount(devices.length);
     }
 
     function updateDeviceSelect(devices) {
@@ -443,7 +449,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function fetchScannerStatus() {
         try {
-            const response = await fetch('/api/scanner_status');
+            const response = await fetch('/api/scanner/status');
             const data = await response.json();
             scannerIsRunning = (data.scanner_status === 'running');
             updateScannerButtons();
@@ -456,13 +462,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function fetchLogServerStatus() {
         try {
-            const response = await fetch('/api/log_server_status');
+            const response = await fetch('/api/log/status');
             const data = await response.json();
             logServerIsRunning = (data.log_server_status === 'running');
             updateLogServerButtons();
         } catch (error) {
             console.error('JS ERROR: Error fetching log server status:', error);
-            logServerIsRunning = false; 
+            logServerIsRunning = false;
             updateLogServerButtons();
         }
     }
@@ -523,10 +529,28 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     startScannerButton.addEventListener('click', async () => {
-        startScannerButton.disabled = true; 
-        deviceList.innerHTML = '<li>Scanning for devices (continuous)...</li>'; 
-        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>'; 
-        currentDevices = []; 
+        startScannerButton.disabled = true;
+        deviceList.innerHTML = '<li>Scanning for devices (continuous)...</li>';
+
+        // 保存当前选中的设备，以便在扫描期间保持连接状态
+        const currentlySelectedIp = deviceSelect.value;
+        const currentlyConnectedDevices = currentDevices.filter(device => device.status === 'Connected');
+
+        // 清空设备列表但保留当前连接的设备在下拉列表中
+        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>';
+
+        // 重新添加当前连接的设备到下拉列表
+        currentlyConnectedDevices.forEach(device => {
+            const option = document.createElement('option');
+            option.value = device.ip;
+            option.textContent = `${device.id} (${device.ip}) - ${device.status}`;
+            if (device.ip === currentlySelectedIp) {
+                option.selected = true;
+            }
+            deviceSelect.appendChild(option);
+        });
+
+        currentDevices = [];
 
         try {
             const data = await apiRequest('/api/scanner/start', { method: 'POST' }, scannerLoadingIndicator);
@@ -537,15 +561,15 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } catch (error) {
             console.error('JS ERROR: Error starting continuous scanner:', error);
-            deviceList.innerHTML = '<li>Error starting scanner.</li>'; 
+            deviceList.innerHTML = '<li>Error starting scanner.</li>';
             showError('Failed to start device scanner: ' + error.message);
         } finally {
-            updateScannerButtons(); 
+            updateScannerButtons();
         }
     });
 
     stopScannerButton.addEventListener('click', async () => {
-        stopScannerButton.disabled = true; 
+        stopScannerButton.disabled = true;
         try {
             const data = await apiRequest('/api/scanner/stop', { method: 'POST' }, scannerLoadingIndicator);
             if (data.status === 'scanner_stopped' || data.status === 'scanner_not_running') {
@@ -557,24 +581,64 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('JS ERROR: Error stopping continuous scanner:', error);
             showError('Failed to stop device scanner: ' + error.message);
         } finally {
-            updateScannerButtons(); 
+            updateScannerButtons();
         }
     });
 
+
     scanButton.addEventListener('click', async () => {
-        scanButton.disabled = true; 
-        deviceList.innerHTML = '<li>Scanning for devices (5 seconds)...</li>'; 
-        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>'; 
-        currentDevices = []; 
+        scanButton.disabled = true;
+        // 显示扫描状态
+        deviceList.innerHTML = '<li>Scanning for devices (5 seconds)...</li>';
+
+        // 保存当前选中的设备，以便在扫描期间保持连接状态
+        const currentlySelectedIp = deviceSelect.value;
+        const currentlyConnectedDevices = currentDevices.filter(device => device.status === 'Connected');
+
+        // 清空设备列表但保留当前连接的设备在下拉列表中
+        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>';
+
+        // 重新添加当前连接的设备到下拉列表
+        currentlyConnectedDevices.forEach(device => {
+            const option = document.createElement('option');
+            option.value = device.ip;
+            option.textContent = `${device.id} (${device.ip}) - ${device.status}`;
+            if (device.ip === currentlySelectedIp) {
+                option.selected = true;
+            }
+            deviceSelect.appendChild(option);
+        });
+
+        currentDevices = [];
+
+        // 设置标志表示正在进行手动扫描和一次性扫描
+        isManualScanInProgress = true;
+        isSingleScanInProgress = true;
+        updateScannerButtons(); // 更新按钮状态
 
         try {
-            await apiRequest('/api/scan', { method: 'POST' }, scannerLoadingIndicator);
+            await apiRequest('/api/scanner/refresh', { method: 'POST' }, scannerLoadingIndicator);
         } catch (error) {
             console.error('JS ERROR: Error initiating device list refresh:', error);
-            deviceList.innerHTML = '<li>Error initiating scan.</li>'; 
+            deviceList.innerHTML = '<li>Error initiating scan.</li>';
             showError('Failed to initiate device scan: ' + error.message);
+            // 出现错误时也需要重置标志
+            isManualScanInProgress = false;
+            isSingleScanInProgress = false;
+            updateScannerButtons(); // 更新按钮状态
         } finally {
-            scanButton.disabled = scannerIsRunning; 
+            // 在finally中更新按钮状态，但不重置isSingleScanInProgress，因为它需要等待WebSocket消息
+            updateScannerButtons();
+
+            // 设置一个超时，以防WebSocket消息未能到达
+            // 通常后端会在5秒扫描完成后推送设备列表
+            setTimeout(() => {
+                if (isSingleScanInProgress) {
+                    // 如果在预期时间内没有收到WebSocket消息，手动重置标志
+                    isSingleScanInProgress = false;
+                    updateScannerButtons(); // 更新按钮状态
+                }
+            }, 6000); // 6秒后重置，比5秒扫描稍长
         }
     });
 
@@ -729,9 +793,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // === Initial Setup on Page Load ===
-    updateDeviceControlButtons(); 
-    fetchScannerStatus(); 
-    fetchLogServerStatus(); 
+    updateDeviceControlButtons();
+    updateDeviceList(currentDevices); // 初始化设备列表
+    updateDeviceSelect(currentDevices); // 初始化设备选择
+    updateDiscoveredDevicesCount(currentDevices.length); // 初始化设备计数
+    fetchScannerStatus();
+    fetchLogServerStatus();
     loadSidePanelState(); // 页面加载时加载侧边栏状态
     
     // 添加窗口大小变化的防抖处理

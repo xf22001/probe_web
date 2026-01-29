@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -490,14 +491,15 @@ func (s *ServerState) StartHTTPAndWSServers() {
 	httpMux.Handle("/", http.FileServer(http.Dir(s.StaticDir))) // Serve static files from provided path
 	httpMux.HandleFunc("/api/scanner/start", s.handleScannerStart)
 	httpMux.HandleFunc("/api/scanner/stop", s.handleScannerStop)
-	httpMux.HandleFunc("/api/scanner_status", s.handleScannerStatus)
-	httpMux.HandleFunc("/api/scan", s.handleScan)
+	httpMux.HandleFunc("/api/scanner/refresh", s.handleScan)
+	httpMux.HandleFunc("/api/scanner/status", s.handleScannerStatus)
 	httpMux.HandleFunc("/api/log/start", s.handleLogStart)
 	httpMux.HandleFunc("/api/log/stop", s.handleLogStop)
-	httpMux.HandleFunc("/api/log_server_status", s.handleLogStatus)
+	httpMux.HandleFunc("/api/log/status", s.handleLogStatus)
 	httpMux.HandleFunc("/api/connect", s.handleConnect)
 	httpMux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	httpMux.HandleFunc("/api/send", s.handleSend)
+	httpMux.HandleFunc("/api/batch_send", s.handleBatchSend)
 
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", HTTPPort),
@@ -1169,6 +1171,104 @@ func (s *ServerState) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSON(w, map[string]interface{}{"status": "sent", "fragments_sent_by_system": len(EncodeRequest(uint32(b.Fn), uint32(b.Stage), raw))})
+}
+
+// handleBatchSend handles sending multiple commands to one or more devices
+func (s *ServerState) handleBatchSend(w http.ResponseWriter, r *http.Request) {
+	var batchReq struct {
+		Commands []struct {
+			IP    string `json:"ip"`
+			Text  string `json:"text"`
+			Fn    int    `json:"fn"`
+			Stage int    `json:"stage"`
+		} `json:"commands"`
+	}
+
+	err := json.NewDecoder(r.Body).Decode(&batchReq)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		sendJSON(w, map[string]string{"status": "error", "reason": "invalid request body"})
+		return
+	}
+
+	results := make([]map[string]interface{}, 0)
+
+	for _, cmd := range batchReq.Commands {
+		result := map[string]interface{}{"ip": cmd.IP, "text": cmd.Text}
+
+		var finalFn, finalStage int
+		var dataPayload []byte
+
+		// If fn is -1, parse fn, stage, and data from the text field.
+		if cmd.Fn == -1 {
+			parts := strings.Fields(cmd.Text)
+			if len(parts) == 0 {
+				result["status"] = "error"
+				result["reason"] = "empty data string for parsing"
+				results = append(results, result)
+				continue
+			}
+
+			// First part must be fn
+			fn, err := strconv.Atoi(parts[0])
+			if err != nil {
+				result["status"] = "error"
+				result["reason"] = "failed to parse fn from data string: " + parts[0]
+				results = append(results, result)
+				continue
+			}
+			finalFn = fn
+
+			// Check for stage in the second part
+			if len(parts) > 1 {
+				stage, err := strconv.Atoi(parts[1])
+				if err == nil { // It's a number, so it is a stage
+					finalStage = stage
+					if len(parts) > 2 {
+						dataPayload = []byte(strings.Join(parts[2:], " "))
+					}
+				} else { // Not a number, so it is part of the data, and stage defaults to 0
+					finalStage = 0
+					dataPayload = []byte(strings.Join(parts[1:], " "))
+				}
+			} else {
+				finalStage = 0
+			}
+		} else {
+			finalFn = cmd.Fn
+			finalStage = cmd.Stage
+			dataPayload = []byte(cmd.Text)
+		}
+
+		raw := dataPayload
+		if finalStage == 0 { // Preserve client behavior
+			raw = append(raw, 0)
+		}
+
+		s.ConnectionsLock.Lock()
+		dc, ok := s.Connections[cmd.IP]
+		s.ConnectionsLock.Unlock()
+
+		if !ok {
+			result["status"] = "error"
+			result["reason"] = "not connected to device"
+			results = append(results, result)
+			continue
+		}
+
+		if err := dc.Send(uint32(finalFn), uint32(finalStage), raw); err != nil {
+			log.Printf("Error sending message to %s: %v", cmd.IP, err)
+			result["status"] = "error"
+			result["reason"] = fmt.Sprintf("failed to send message: %v", err)
+		} else {
+			result["status"] = "sent"
+			result["fragments_sent_by_system"] = len(EncodeRequest(uint32(finalFn), uint32(finalStage), raw))
+		}
+
+		results = append(results, result)
+	}
+
+	sendJSON(w, map[string]interface{}{"results": results})
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}

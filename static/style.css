@@ -81,14 +81,14 @@ header h1 {
 
 /* PC端布局 */
 .side-panel {
-    width: 300px; 
+    width: 360px; 
     padding: 15px;
     border-right: 1px solid #eee;
     background-color: #fafafa;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 15px;
+    gap: 8px;
     /* 新增: 平滑过渡效果 */
     transition: width 0.3s ease, padding 0.3s ease, opacity 0.3s ease, max-height 0.3s ease, border-width 0.3s ease;
     overflow-x: hidden; /* 防止内容在收缩时溢出 */
@@ -137,14 +137,14 @@ header h1 {
 .log-buttons-group { display: flex; gap: 5px; }
 
 .log-area {
-    flex: 1; 
+    flex: 1;
     border: 1px solid #ccc;
     background-color: #222;
     color: #0f0;
     padding: 10px;
     overflow-y: auto; /* 只有这里可以滚动 */
     font-family: monospace;
-    font-size: 0.85rem;
+    font-size: 0.75rem; /* 减小字体大小 */
     line-height: 1.4;
     white-space: pre-wrap;
     word-break: break-all;
@@ -260,8 +260,8 @@ button:disabled { background-color: #e0e0e0; color: #999; }
 
 .button-group {
     display: flex;
-    gap: 5px;
-    flex-wrap: wrap;
+    gap: 3px;
+    flex-wrap: nowrap;
     align-items: center;
 }
 
@@ -269,7 +269,7 @@ button:disabled { background-color: #e0e0e0; color: #999; }
     flex-shrink: 0;
 }
 
-.small-button { height: 28px; font-size: 12px; }
+.small-button { height: 28px; font-size: 12px; white-space: nowrap; }
 
 /* 新增: Header中切换按钮的样式 */
 .header-toggle-button {
@@ -279,19 +279,32 @@ button:disabled { background-color: #e0e0e0; color: #999; }
     white-space: nowrap; /* 防止文本换行 */
 }
 
-#deviceList {
-    list-style: none;
-    padding: 0;
-    border: 1px solid #eee;
-    height: 100px; 
-    overflow-y: auto;
-    margin-top: 5px;
-    background: #fff;
-}
+    #deviceList {
+        list-style: none;
+        padding: 0;
+        border: 1px solid #eee;
+        max-height: 80px;  /* 恢复到合适的高度 */
+        overflow-y: auto;
+        margin-top: 5px;
+        background: #fff;
+    }
 
 #deviceList li { padding: 8px; border-bottom: 1px solid #eee; font-size: 0.85em; }
 
+
 .info-text { font-size: 0.85em; margin-top: 5px; min-height: 1.2em; }
+
+/* 设备计数徽章样式 */
+.device-count-badge {
+    background-color: #007bff;
+    color: white;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: bold;
+    margin-left: 8px;
+    vertical-align: middle;
+}
 .command-response { color: #ffd700; font-weight: bold; }
 
 /* Modal styles */
@@ -349,19 +362,19 @@ button:focus, input:focus, select:focus {
     }
 
     .button-group {
-        flex-wrap: nowrap;
+        flex-wrap: nowrap; /* 与PC端保持一致 */
     }
 
     .button-group .loading-indicator {
-        height: 44px;
-        line-height: 44px;
+        height: 36px; /* 与PC端控件高度保持一致 */
+        line-height: 36px; /* 与PC端控件高度保持一致 */
     }
 
     /* 2. 侧边栏在顶部 */
     .side-panel {
         width: 100%;
         height: auto; /* 默认高度由内容决定 */
-        max-height: 220px; /* 限制最大高度，默认展开状态 */
+        max-height: 220px; /* 恢复到原来的合理高度 */
         border-right: none;
         border-bottom: 1px solid #ccc;
         flex-shrink: 0;
@@ -389,8 +402,8 @@ button:focus, input:focus, select:focus {
 
     /* 改进日志显示区域在移动端的表现 */
     .log-area {
-        font-size: 0.9rem; /* 稍微增大字体提高可读性 */
-        padding: 8px;
+        font-size: 0.75rem; /* 减小字体大小以保持一致 */
+        padding: 10px; /* 与PC端保持一致 */
         /* 添加触摸滚动优化 */
         -webkit-overflow-scrolling: touch;
         /* 确保在小屏幕上也有最小高度 */
@@ -413,76 +426,74 @@ button:focus, input:focus, select:focus {
         transition: transform 0.3s ease;
     }
 
-    /* 5. 触控尺寸优化 - 增强大小屏差异 */
+    /* 5. 统一控件尺寸 - 保持与PC端一致 */
     button, select, input[type="text"] {
-        height: clamp(32px, 6vw + 24px, 52px); /* 增大系数，增强大小屏差异 */
-        font-size: clamp(13px, 1.8vw + 12px, 20px); /* 增大系数，增强大小屏差异 */
+        height: 36px;        /* 与PC端保持一致 */
+        font-size: 14px;     /* 与PC端保持一致 */
+        padding: 0 10px;     /* 与PC端保持一致 */
     }
 
     .small-button {
-        height: clamp(26px, 4.5vw + 18px, 40px); /* 增大系数，增强大小屏差异 */
+        height: 28px;        /* 与PC端保持一致 */
+        font-size: 12px;     /* 与PC端保持一致 */
     }
 
     /* 移动端Header中的切换按钮样式调整 */
     .header-toggle-button {
-        height: clamp(32px, 6vw + 24px, 48px); /* 增大系数，增强大小屏差异 */
-        font-size: clamp(13px, 1.8vw + 12px, 18px); /* 增大系数，增强大小屏差异 */
+        height: 36px;        /* 与PC端保持一致 */
+        font-size: 0.9rem;   /* 与PC端保持一致 */
     }
 
     /* 隐藏标题节省空间 */
     .command-section h3 { display: none; }
 
     /* 调整设备列表高度 */
-    #deviceList { height: 80px; }
+    #deviceList {
+        max-height: 80px;  /* 使用max-height保持一致 */
+        height: auto;      /* 让高度根据内容自适应，不超过最大值 */
+    }
 }
 
 /* =========================================
    === 小屏幕适配 (Small Screens) ===
    ========================================= */
 @media (max-width: 480px) {
-    /* 优化触控尺寸，适应小屏幕 */
+    /* 保持与统一标准一致 */
     button, select, input[type="text"] {
-        height: 36px; /* 进一步减小高度 */
-        font-size: 14px; /* 进一步减小字体 */
-        padding: 0 6px; /* 进一步减少内边距 */
+        height: 36px; /* 与统一标准保持一致 */
+        font-size: 14px; /* 与统一标准保持一致 */
+        padding: 0 10px; /* 与统一标准保持一致 */
     }
 
     .small-button {
-        height: 26px;
-        font-size: 13px;
+        height: 28px; /* 与统一标准保持一致 */
+        font-size: 12px; /* 与统一标准保持一致 */
     }
 
     .header-toggle-button {
-        height: 36px;
-        font-size: 0.85rem;
-    }
-
-    /* 特定按钮进一步缩小 */
-    #startScannerButton, #stopScannerButton, #scanButton, #toggleSidePanelButton {
-        height: 32px;
-        font-size: 12px;
-        padding: 0 6px;
+        height: 36px; /* 与统一标准保持一致 */
+        font-size: 0.9rem; /* 与统一标准保持一致 */
     }
 
     /* 调整按钮组布局 */
     .button-group {
-        gap: 3px; /* 进一步减少按钮间距 */
+        gap: 3px; /* 与统一标准保持一致 */
         flex-wrap: wrap; /* 允许换行 */
     }
 
     /* 调整内容区域 */
     .log-area {
-        min-height: 100px;
-        font-size: 0.8rem;
-        padding: 4px;
+        min-height: 150px; /* 与PC端保持一致 */
+        font-size: 0.75rem; /* 减小字体大小以保持一致 */
+        padding: 10px; /* 与PC端保持一致 */
     }
 
     #deviceList {
-        height: 50px;
-        font-size: 0.75rem;
+        max-height: 80px; /* 与统一标准保持一致 */
+        font-size: 0.85em; /* 与PC端保持一致 */
     }
 
     .side-panel {
-        max-height: 150px;
+        max-height: 150px; /* 恢复到更合适的高度 */
     }
 }

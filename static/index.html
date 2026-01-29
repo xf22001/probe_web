@@ -10,10 +10,8 @@
     <div class="main-layout-wrapper">
         <header>
             <h1>Probe Web Tool</h1>
-            <!-- 新增：侧边栏切换按钮 -->
             <button id="toggleSidePanelButton" class="small-button header-toggle-button" aria-expanded="true">Collapse panel</button>
         </header>
-        <!-- 错误提示区域 -->
         <div id="errorMessage" class="error-message" style="display: none;"></div>
 
         <div class="content-area">
@@ -21,15 +19,15 @@
                 <div class="section">
                     <h2>Device Discovery</h2>
                     <div class="button-group">
-                        <button id="startScannerButton" aria-label="Start continuous device scanning">Start Scanner</button>
-                        <button id="stopScannerButton" disabled aria-label="Stop continuous device scanning">Stop Scanner</button>
-                        <button id="scanButton" aria-label="Refresh device list">Refresh Devices</button>
+                        <button id="startScannerButton" class="small-button" aria-label="Start continuous device scanning">Start Scanner</button>
+                        <button id="stopScannerButton" disabled class="small-button" aria-label="Stop continuous device scanning">Stop Scanner</button>
+                        <button id="scanButton" class="small-button" aria-label="Refresh device list">Refresh Devices</button>
                         <div id="scannerLoadingIndicator" class="loading-indicator" style="display: none;" aria-live="polite">Scanning...</div>
                     </div>
                     <ul id="deviceList"></ul>
                 </div>
                 <div class="section">
-                    <h2>Device Control</h2>
+                    <h2>Device Control <span id="discoveredDevicesCount" class="device-count-badge">0 devices</span></h2>
                     <select id="deviceSelect">
                         <option value="">-- Select a device --</option>
                     </select>
@@ -38,7 +36,6 @@
                         <button id="disconnectButton" disabled aria-label="Disconnect from device">Disconnect</button>
                         <div id="connectionLoadingIndicator" class="loading-indicator" style="display: none;" aria-live="polite">Connecting...</div>
                     </div>
-                    <!-- 新增: 连接信息显示区域 -->
                     <p id="connectionInfo" class="info-text"></p>
                 </div>
             </aside>
@@ -62,14 +59,11 @@
         <footer class="bottom-command-panel">
             <div class="section command-section">
                 <h3>Send Command (Text)</h3>
-                <!-- 修改开始: 增加 input-wrapper 包裹输入框和历史列表 -->
                 <div class="input-wrapper">
-                    <!-- 历史记录列表容器 -->
                     <ul id="commandHistoryList" class="history-list" style="display: none;"></ul>
                     <input type="text" id="commandInput" placeholder="Enter text command" autocomplete="off">
                     <div id="commandSendingIndicator" class="loading-indicator inline" style="display: none;">Sending...</div>
                 </div>
-                <!-- 修改结束 -->
                 <button id="sendCommandButton" disabled>Send Text Command</button>
             </div>
         </footer>
