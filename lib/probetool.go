@@ -770,6 +770,12 @@ func (s *ServerState) StartContinuousScanner() error {
 	if s.ScannerStopChan != nil {
 		return fmt.Errorf("scanner already running")
 	}
+
+	// Reset the active scan results to start tracking for this new session.
+	s.ActiveScanLock.Lock()
+	s.ActiveScanResults = make(map[string]bool)
+	s.ActiveScanLock.Unlock()
+
 	stopChan := make(chan struct{})
 	s.ScannerStopChan = stopChan
 	go s.RunUdpListener(stopChan)
@@ -785,6 +791,29 @@ func (s *ServerState) StopContinuousScanner() error {
 	close(s.ScannerStopChan)
 	s.ScannerStopChan = nil
 	log.Println("Continuous scanner stopped.")
+
+	// After stopping, perform cleanup based on the results of the scan session.
+	s.DevicesLock.Lock()
+	s.ActiveScanLock.Lock() // Lock both to be safe
+
+	ipsToRemove := []string{}
+	for ip, dev := range s.Devices {
+		// If a device is "Available" but was not found in the scan session that just ended, remove it.
+		// "Connected" devices are NEVER removed by this logic.
+		if dev.Status == "Available" && !s.ActiveScanResults[ip] {
+			ipsToRemove = append(ipsToRemove, ip)
+		}
+	}
+	for _, ip := range ipsToRemove {
+		delete(s.Devices, ip)
+		log.Printf("Removing stale device after continuous scan: %s", ip)
+	}
+
+	s.ActiveScanLock.Unlock()
+	s.DevicesLock.Unlock()
+
+	go s.PushDevicesSnapshot() // Push the cleaned list to clients
+
 	return nil
 }
 

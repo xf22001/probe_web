@@ -374,7 +374,7 @@ button:focus, input:focus, select:focus {
     .side-panel {
         width: 100%;
         height: auto; /* 默认高度由内容决定 */
-        max-height: 220px; /* 恢复到原来的合理高度 */
+        max-height: 300px; /* Increased height to make "Device Control" visible */
         border-right: none;
         border-bottom: 1px solid #ccc;
         flex-shrink: 0;
@@ -494,6 +494,6 @@ button:focus, input:focus, select:focus {
     }
 
     .side-panel {
-        max-height: 150px; /* 恢复到更合适的高度 */
+        max-height: 280px; /* Increased height for smaller mobile screens */
     }
 }
