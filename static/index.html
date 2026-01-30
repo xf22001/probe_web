@@ -17,7 +17,7 @@
         <div class="content-area">
             <aside class="side-panel">
                 <div class="section">
-                    <h2>Device Discovery</h2>
+                    <h2>Device Discovery <span id="discoveredDevicesCount" class="device-count-badge">0 devices</span></h2>
                     <div class="button-group">
                         <button id="startScannerButton" class="small-button" aria-label="Start continuous device scanning">Start Scanner</button>
                         <button id="stopScannerButton" disabled class="small-button" aria-label="Stop continuous device scanning">Stop Scanner</button>
@@ -25,18 +25,6 @@
                         <div id="scannerLoadingIndicator" class="loading-indicator" style="display: none;" aria-live="polite">Scanning...</div>
                     </div>
                     <ul id="deviceList"></ul>
-                </div>
-                <div class="section">
-                    <h2>Device Control <span id="discoveredDevicesCount" class="device-count-badge">0 devices</span></h2>
-                    <select id="deviceSelect">
-                        <option value="">-- Select a device --</option>
-                    </select>
-                    <div class="button-group">
-                        <button id="connectButton" aria-label="Connect to selected device">Connect</button>
-                        <button id="disconnectButton" disabled aria-label="Disconnect from device">Disconnect</button>
-                        <div id="connectionLoadingIndicator" class="loading-indicator" style="display: none;" aria-live="polite">Connecting...</div>
-                    </div>
-                    <p id="connectionInfo" class="info-text"></p>
                 </div>
             </aside>
 

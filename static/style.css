@@ -118,10 +118,21 @@ header h1 {
 
 /* === 日志区域 === */
 .log-section {
-    flex: 1; 
+    flex: 1;
     display: flex;
-    flex-direction: column; 
-    overflow: hidden; 
+    flex-direction: column;
+    overflow: hidden;
+}
+
+@media (max-width: 768px) {
+    .log-section {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        min-height: 0; /* 允许内容区域收缩 */
+        height: 100%; /* 确保占满容器 */
+    }
 }
 
 .log-header-controls {
@@ -283,7 +294,7 @@ button:disabled { background-color: #e0e0e0; color: #999; }
         list-style: none;
         padding: 0;
         border: 1px solid #eee;
-        max-height: 80px;  /* 恢复到合适的高度 */
+        max-height: 200px;  /* 增加高度以显示更多设备 */
         overflow-y: auto;
         margin-top: 5px;
         background: #fff;
@@ -359,6 +370,7 @@ button:focus, input:focus, select:focus {
         /* 关键：给底部留出空间，防止内容被 fixed 的 footer 遮挡 */
         /* 使用 env() 函数更好地适配不同设备 */
         padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+        height: 100%;
     }
 
     .button-group {
@@ -373,13 +385,14 @@ button:focus, input:focus, select:focus {
     /* 2. 侧边栏在顶部 */
     .side-panel {
         width: 100%;
-        height: auto; /* 默认高度由内容决定 */
-        max-height: 300px; /* Increased height to make "Device Control" visible */
+        height: 300px; /* 固定移动端侧边栏高度 */
+        max-height: 300px; /* 限制移动端总高度，防止占用过多屏幕 */
         border-right: none;
         border-bottom: 1px solid #ccc;
         flex-shrink: 0;
         /* 添加平滑展开/收起动画 */
         transition: max-height 0.3s ease, padding 0.3s ease;
+        overflow-y: auto; /* 添加滚动条，防止内容溢出 */
     }
 
     /* 新增: 移动端侧边栏收起时的样式 */
@@ -393,11 +406,13 @@ button:focus, input:focus, select:focus {
 
     /* 3. 日志区域 */
     .center-content {
-        height: auto;
         flex: 1; /* 自动填充剩余空间 */
         padding: 10px;
         /* 确保在移动设备上有足够的最小高度 */
         min-height: 200px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden; /* 防止内容溢出 */
     }
 
     /* 改进日志显示区域在移动端的表现 */
@@ -449,7 +464,7 @@ button:focus, input:focus, select:focus {
 
     /* 调整设备列表高度 */
     #deviceList {
-        max-height: 80px;  /* 使用max-height保持一致 */
+        max-height: 200px;  /* 使用更大的max-height以显示更多设备 */
         height: auto;      /* 让高度根据内容自适应，不超过最大值 */
     }
 }
@@ -489,11 +504,24 @@ button:focus, input:focus, select:focus {
     }
 
     #deviceList {
-        max-height: 80px; /* 与统一标准保持一致 */
+        max-height: 200px; /* 增加高度以显示更多设备 */
         font-size: 0.85em; /* 与PC端保持一致 */
     }
 
     .side-panel {
-        max-height: 280px; /* Increased height for smaller mobile screens */
+        max-height: 350px; /* 限制小屏幕的总高度 */
     }
+}
+
+/* 选中设备列表项的样式 */
+#deviceList li.selected {
+    background-color: #d1ecf1;
+    border-left: 3px solid #007bff;
+    color: #0c5460;
+    font-weight: bold;
+}
+
+#deviceList li:hover {
+    background-color: #f8f9fa;
+    cursor: pointer;
 }

@@ -56,7 +56,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const deviceList = document.getElementById('deviceList');
     const scannerLoadingIndicator = document.getElementById('scannerLoadingIndicator');
 
-    const deviceSelect = document.getElementById('deviceSelect');
+    // Note: deviceSelect element has been removed from HTML, but we keep the variable for compatibility
+    // All device selection now happens through the device list
+    const deviceSelect = document.getElementById('deviceSelect'); // Will be null after HTML removal
     const connectButton = document.getElementById('connectButton');
     const disconnectButton = document.getElementById('disconnectButton');
     const connectionInfo = document.getElementById('connectionInfo');
@@ -79,10 +81,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const errorMessage = document.getElementById('errorMessage');
 
     let currentDevices = [];
+    let selectedDeviceIp = null;  // Track selected device from list
     let scannerIsRunning = false;
     let logServerIsRunning = false;
     let isManualScanInProgress = false;
     let isSingleScanInProgress = false;
+    let scanRequestId = null;  // Unique ID for the current scan request
     let isSidePanelCollapsed = false;
     const SIDE_PANEL_STATE_KEY = 'probe_tool_side_panel_collapsed';
 
@@ -151,12 +155,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         updateDeviceList(currentDevices);
                         updateDeviceSelect(currentDevices);
                         isManualScanInProgress = false;
+                        isSingleScanInProgress = false;
+                        scanRequestId = null;
                     } else {
                         debouncedUpdateDeviceUI();
-                    }
-
-                    if (isSingleScanInProgress && !scannerIsRunning) {
-                        isSingleScanInProgress = false;
                     }
 
                     updateScannerButtons();
@@ -318,10 +320,9 @@ document.addEventListener('DOMContentLoaded', () => {
     loadHistory();
 
     commandInput.addEventListener('focus', (e) => {
-        // 输入框获得焦点时显示历史记录（如果有）
-        if (commandHistory.length > 0) {
+        if (commandHistory.length > 0 && selectedDeviceIp) {
             renderHistoryList();
-            commandHistoryList.style.display = 'block';  // 立即显示，然后可以添加其他效果
+            commandHistoryList.style.display = 'block';
         }
     });
 
@@ -350,29 +351,41 @@ document.addEventListener('DOMContentLoaded', () => {
     // === UI 更新函数 ===
 
     function updateDeviceControlButtons() {
-        const selectedIp = deviceSelect.value;
+        const selectedIp = selectedDeviceIp;
         const selectedDevice = currentDevices.find(d => d.ip === selectedIp);
         const isConnected = selectedDevice && selectedDevice.status === 'Connected';
 
-        updateButtonStates({
-            'connectButton': !selectedIp || isConnected,
-            'disconnectButton': !selectedIp || !isConnected,
-            'sendCommandButton': !isConnected
+        document.querySelectorAll('#deviceList li').forEach(li => {
+            if (li.dataset.ip === selectedIp) {
+                const connectBtn = li.querySelector('.device-connect-btn');
+                const disconnectBtn = li.querySelector('.device-disconnect-btn');
+                const connectionInfoEl = li.querySelector('.device-connection-info');
+
+                if (connectBtn) {
+                    connectBtn.disabled = !selectedIp || isConnected;
+                }
+                if (disconnectBtn) {
+                    disconnectBtn.disabled = !selectedIp || !isConnected;
+                }
+
+                if (connectionInfoEl && isConnected && selectedDevice.connected_via) {
+                    connectionInfoEl.textContent = `Via Local IP: ${selectedDevice.connected_via}`;
+                    connectionInfoEl.style.color = '#006400';
+                } else if (connectionInfoEl && selectedDevice && selectedDevice.status === 'Available') {
+                    connectionInfoEl.textContent = 'Device Available';
+                    connectionInfoEl.style.color = '#666';
+                } else if (connectionInfoEl) {
+                    connectionInfoEl.textContent = '';
+                }
+            }
         });
 
-        // 当设备连接成功时，自动聚焦到命令输入框
-        if (isConnected) {
-            commandInput.focus();
+        if (sendCommandButton) {
+            sendCommandButton.disabled = !isConnected;
         }
 
-        if (isConnected && selectedDevice.connected_via) {
-            connectionInfo.textContent = `Via Local IP: ${selectedDevice.connected_via}`;
-            connectionInfo.style.color = '#006400'; 
-        } else if (selectedDevice && selectedDevice.status === 'Available') {
-            connectionInfo.textContent = 'Device Available';
-            connectionInfo.style.color = '#666';
-        } else {
-            connectionInfo.textContent = ''; 
+        if (isConnected) {
+            commandInput.focus();
         }
     }
 
@@ -402,47 +415,109 @@ document.addEventListener('DOMContentLoaded', () => {
         deviceList.innerHTML = '';
         if (!devices || devices.length === 0) {
             deviceList.innerHTML = '<li>No devices found. Start scanner or click "Refresh Devices"</li>';
-            // 更新设备计数
             updateDiscoveredDevicesCount(0);
+            selectedDeviceIp = null;
+            updateDeviceControlButtons();
             return;
         }
+
+        const isSelectedDevicePresent = devices.some(device => device.ip === selectedDeviceIp);
+        if (selectedDeviceIp && !isSelectedDevicePresent) {
+            selectedDeviceIp = null;
+        }
+
         devices.forEach(device => {
             if (device.ip && device.id !== undefined && device.id !== null) {
                 const li = document.createElement('li');
-                li.textContent = `${device.ip}-[${device.id}] Status: ${device.status}`;
+                li.dataset.ip = device.ip;
+
+                const deviceInfoDiv = document.createElement('div');
+                deviceInfoDiv.className = 'device-info';
+                deviceInfoDiv.textContent = `${device.ip}-[${device.id}] Status: ${device.status}`;
+
+                li.appendChild(deviceInfoDiv);
+
+                const controlDiv = document.createElement('div');
+                controlDiv.className = 'device-control-div';
+                controlDiv.style.display = 'none';
+                controlDiv.innerHTML = `
+                    <div class="button-group">
+                        <button class="device-connect-btn" data-ip="${device.ip}" aria-label="Connect to selected device">Connect</button>
+                        <button class="device-disconnect-btn" data-ip="${device.ip}" aria-label="Disconnect from device">Disconnect</button>
+                        <div class="device-connection-loading loading-indicator" style="display: none;" aria-live="polite">Connecting...</div>
+                    </div>
+                    <p class="device-connection-info info-text"></p>
+                `;
+
+                li.appendChild(controlDiv);
+
+                // 设备信息区域点击事件 - 用于选择设备
+                deviceInfoDiv.addEventListener('click', function(event) {
+                    event.stopPropagation();
+
+                    if (selectedDeviceIp === device.ip) {
+                        // 取消选择当前设备
+                        selectedDeviceIp = null;
+                        li.classList.remove('selected');
+                        controlDiv.style.display = 'none';
+                    } else {
+                        // 选择新设备
+                        // 移除所有选中高亮
+                        document.querySelectorAll('#deviceList li').forEach(item => {
+                            item.classList.remove('selected');
+                        });
+                        // 隐藏所有控制按钮
+                        document.querySelectorAll('#deviceList .device-control-div').forEach(div => {
+                            div.style.display = 'none';
+                        });
+
+                        // 选中当前设备
+                        li.classList.add('selected');
+                        selectedDeviceIp = device.ip;
+                        controlDiv.style.display = 'block';
+                    }
+
+                    updateDeviceControlButtons();
+                });
+
+                // 控制区域点击事件 - 阻止冒泡，不触发设备选择
+                controlDiv.addEventListener('click', function(event) {
+                    // 如果点击的是控制按钮，让按钮事件处理器处理
+                    if (event.target.classList.contains('device-connect-btn') ||
+                        event.target.classList.contains('device-disconnect-btn') ||
+                        event.target.classList.contains('device-connection-loading') ||
+                        event.target.classList.contains('device-connection-info')) {
+                        return;
+                    }
+                    // 其他控制区域点击，阻止冒泡
+                    event.stopPropagation();
+                });
+
+                if (selectedDeviceIp === device.ip) {
+                    li.classList.add('selected');
+                    setTimeout(() => {
+                        const controlDiv = li.querySelector('.device-control-div');
+                        if (controlDiv) {
+                            controlDiv.style.display = 'block';
+                        }
+                    }, 0);
+                }
+
                 deviceList.appendChild(li);
             }
         });
 
-        // 更新设备计数
         updateDiscoveredDevicesCount(devices.length);
     }
 
     function updateDeviceSelect(devices) {
-        // 保存当前选中的值
-        const selectedIp = deviceSelect.value;
-
-        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>';
-        if (!devices || devices.length === 0) {
-            updateDeviceControlButtons();
-            return;
-        }
-        devices.forEach(device => {
-            if (device.ip && device.id !== undefined && device.id !== null) {
-                const option = document.createElement('option');
-                option.value = device.ip;
-                option.textContent = `${device.id} (${device.ip}) - ${device.status}`;
-                if (device.ip === selectedIp) {
-                    option.selected = true;
-                }
-                deviceSelect.appendChild(option);
+        document.querySelectorAll('#deviceList li').forEach(item => {
+            if (item.dataset.ip === selectedDeviceIp) {
+                item.classList.add('selected');
+            } else {
+                item.classList.remove('selected');
             }
         });
-
-        // 如果之前有选中的设备仍然存在，则保持选中状态
-        if (selectedIp && devices.some(device => device.ip === selectedIp)) {
-            deviceSelect.value = selectedIp;
-        }
 
         updateDeviceControlButtons();
     }
@@ -533,22 +608,8 @@ document.addEventListener('DOMContentLoaded', () => {
         deviceList.innerHTML = '<li>Scanning for devices (continuous)...</li>';
 
         // 保存当前选中的设备，以便在扫描期间保持连接状态
-        const currentlySelectedIp = deviceSelect.value;
+        const currentlySelectedIp = selectedDeviceIp;
         const currentlyConnectedDevices = currentDevices.filter(device => device.status === 'Connected');
-
-        // 清空设备列表但保留当前连接的设备在下拉列表中
-        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>';
-
-        // 重新添加当前连接的设备到下拉列表
-        currentlyConnectedDevices.forEach(device => {
-            const option = document.createElement('option');
-            option.value = device.ip;
-            option.textContent = `${device.id} (${device.ip}) - ${device.status}`;
-            if (device.ip === currentlySelectedIp) {
-                option.selected = true;
-            }
-            deviceSelect.appendChild(option);
-        });
 
         currentDevices = [];
 
@@ -592,29 +653,15 @@ document.addEventListener('DOMContentLoaded', () => {
         deviceList.innerHTML = '<li>Scanning for devices (5 seconds)...</li>';
 
         // 保存当前选中的设备，以便在扫描期间保持连接状态
-        const currentlySelectedIp = deviceSelect.value;
+        const currentlySelectedIp = selectedDeviceIp;
         const currentlyConnectedDevices = currentDevices.filter(device => device.status === 'Connected');
-
-        // 清空设备列表但保留当前连接的设备在下拉列表中
-        deviceSelect.innerHTML = '<option value="">-- Select a device --</option>';
-
-        // 重新添加当前连接的设备到下拉列表
-        currentlyConnectedDevices.forEach(device => {
-            const option = document.createElement('option');
-            option.value = device.ip;
-            option.textContent = `${device.id} (${device.ip}) - ${device.status}`;
-            if (device.ip === currentlySelectedIp) {
-                option.selected = true;
-            }
-            deviceSelect.appendChild(option);
-        });
 
         currentDevices = [];
 
-        // 设置标志表示正在进行手动扫描和一次性扫描
+        scanRequestId = Date.now();
         isManualScanInProgress = true;
         isSingleScanInProgress = true;
-        updateScannerButtons(); // 更新按钮状态
+        updateScannerButtons();
 
         try {
             await apiRequest('/api/scanner/refresh', { method: 'POST' }, scannerLoadingIndicator);
@@ -622,58 +669,97 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('JS ERROR: Error initiating device list refresh:', error);
             deviceList.innerHTML = '<li>Error initiating scan.</li>';
             showError('Failed to initiate device scan: ' + error.message);
-            // 出现错误时也需要重置标志
             isManualScanInProgress = false;
             isSingleScanInProgress = false;
-            updateScannerButtons(); // 更新按钮状态
-        } finally {
-            // 在finally中更新按钮状态，但不重置isSingleScanInProgress，因为它需要等待WebSocket消息
+            scanRequestId = null;
             updateScannerButtons();
+        } finally {
+            updateScannerButtons();
+        }
+    });
 
-            // 设置一个超时，以防WebSocket消息未能到达
-            // 通常后端会在5秒扫描完成后推送设备列表
-            setTimeout(() => {
-                if (isSingleScanInProgress) {
-                    // 如果在预期时间内没有收到WebSocket消息，手动重置标志
-                    isSingleScanInProgress = false;
-                    updateScannerButtons(); // 更新按钮状态
+    // Removed deviceSelect change event listener as the dropdown has been removed
+    // Device selection now happens through clicking on the device list items
+
+    // 使用事件委托处理动态添加的按钮
+    deviceList.addEventListener('click', async (event) => {
+        // 处理连接按钮点击
+        if (event.target.classList.contains('device-connect-btn')) {
+            const ip = selectedDeviceIp;
+            if (!ip) return;
+
+            // 获取当前设备项的加载指示器元素
+            const deviceItem = event.target.closest('li');
+            const loadingIndicator = deviceItem.querySelector('.device-connection-loading');
+            if (loadingIndicator) {
+                loadingIndicator.style.display = 'inline-block';
+            }
+
+            // 禁用连接按钮
+            event.target.disabled = true;
+
+            try {
+                await apiRequest('/api/connect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip })
+                }, null); // 不使用全局加载指示器
+
+                // 重新启用断开按钮
+                const disconnectBtn = deviceItem.querySelector('.device-disconnect-btn');
+                if (disconnectBtn) {
+                    disconnectBtn.disabled = false;
                 }
-            }, 6000); // 6秒后重置，比5秒扫描稍长
+            } catch (error) {
+                console.error(`JS ERROR: Error connecting to ${ip}:`, error);
+                showError(`Failed to connect to device ${ip}: ` + error.message);
+            } finally {
+                // 隐藏加载指示器
+                if (loadingIndicator) {
+                    loadingIndicator.style.display = 'none';
+                }
+                // 重新启用连接按钮
+                event.target.disabled = false;
+            }
         }
-    });
+        // 处理断开按钮点击
+        else if (event.target.classList.contains('device-disconnect-btn')) {
+            const ip = selectedDeviceIp;
+            if (!ip) return;
 
-    deviceSelect.addEventListener('change', updateDeviceControlButtons);
+            // 获取当前设备项的加载指示器元素
+            const deviceItem = event.target.closest('li');
+            const loadingIndicator = deviceItem.querySelector('.device-connection-loading');
+            if (loadingIndicator) {
+                loadingIndicator.style.display = 'inline-block';
+            }
 
-    connectButton.addEventListener('click', async () => {
-        const ip = deviceSelect.value;
-        if (!ip) return; 
-        connectButton.disabled = true; 
-        try {
-            await apiRequest('/api/connect', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ip })
-            }, connectionLoadingIndicator);
-        } catch (error) {
-            console.error(`JS ERROR: Error connecting to ${ip}:`, error);
-            showError(`Failed to connect to device ${ip}: ` + error.message);
-        }
-    });
+            // 禁用断开按钮
+            event.target.disabled = true;
 
-    disconnectButton.addEventListener('click', async () => {
-        const ip = deviceSelect.value;
-        if (!ip) return; 
-        
-        disconnectButton.disabled = true; 
-        try {
-            await apiRequest('/api/disconnect', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ip })
-            }, connectionLoadingIndicator);
-        } catch (error) {
-            console.error(`JS ERROR: Error disconnecting from ${ip}:`, error);
-            showError(`Failed to disconnect from device ${ip}: ` + error.message);
+            try {
+                await apiRequest('/api/disconnect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip })
+                }, null); // 不使用全局加载指示器
+
+                // 重新启用连接按钮
+                const connectBtn = deviceItem.querySelector('.device-connect-btn');
+                if (connectBtn) {
+                    connectBtn.disabled = false;
+                }
+            } catch (error) {
+                console.error(`JS ERROR: Error disconnecting from ${ip}:`, error);
+                showError(`Failed to disconnect from device ${ip}: ` + error.message);
+            } finally {
+                // 隐藏加载指示器
+                if (loadingIndicator) {
+                    loadingIndicator.style.display = 'none';
+                }
+                // 重新启用断开按钮
+                event.target.disabled = false;
+            }
         }
     });
 
