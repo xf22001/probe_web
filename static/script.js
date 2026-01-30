@@ -764,18 +764,18 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     sendCommandButton.addEventListener('click', async () => {
-        const ip = deviceSelect.value;
+        const ip = selectedDeviceIp;
         const text = commandInput.value;
-        if (!ip || !text) return; 
+        if (!ip || !text) return;
 
         addCommandToHistory(text);
-        sendCommandButton.disabled = true; 
-        
-        let fnToSend = 0; 
-        const stageToSend = 0; 
-        const dataToSendRaw = text; 
+        sendCommandButton.disabled = true;
 
-        const match = text.match(/^(\d+)/); 
+        let fnToSend = 0;
+        const stageToSend = 0;
+        const dataToSendRaw = text;
+
+        const match = text.match(/^(\d+)/);
         if (match && match[1]) {
             fnToSend = parseInt(match[1], 10);
         }
@@ -788,14 +788,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ip, fn: fnToSend, stage: stageToSend, data_base64: dataToSendBase64 })
             }, commandSendingIndicator);
-            
+
             // 清空输入框
             commandInput.value = '';
         } catch (error) {
             console.error(`JS ERROR: Error sending command:`, error);
             showError('Failed to send command: ' + error.message);
         } finally {
-            sendCommandButton.disabled = false; 
+            sendCommandButton.disabled = false;
         }
     });
 
