@@ -1,0 +1,55 @@
+name: Build macOS Executable (Go)
+
+on:
+  workflow_dispatch:
+  # push:
+  #   paths:
+  #     - '**.go'
+  #     - 'go.mod'
+  #     - 'lib/**'
+
+jobs:
+  build-macos-go:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25' # 保持与 go.mod 中声明的 Go 版本一致
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          go mod tidy
+
+      - name: Build macOS Binaries
+        run: |
+          # 编译 Intel 版本 (x86_64)
+          GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w" -o ProbeWebTool_amd64 main.go
+          
+          # 编译 Apple Silicon 版本 (arm64)
+          GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w" -o ProbeWebTool_arm64 main.go
+          
+          # 创建通用二进制文件 (Universal Binary)
+          lipo -create ProbeWebTool_amd64 ProbeWebTool_arm64 -output ProbeWebTool
+
+      - name: Prepare Distribution Directory
+        run: |
+          # 创建 dist 目录
+          mkdir -p dist
+          
+          # 将通用二进制文件移动到 dist
+          mv ProbeWebTool dist/
+          
+          # 将 static 文件夹复制到 dist (因为 Go 代码中是读取 ./static 目录)
+          cp -R static dist/
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProbeWebTool-macOS-Bundle
+          path: dist/
