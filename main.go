@@ -14,19 +14,19 @@ import (
 
 	// 导入核心库。导入路径是模块路径 + 核心库所在子目录。
 	// 由于lib/probetool.go的包名是`probetool`，我们给导入的包一个同名别名，方便使用。
-	probetool "probetool/lib" // <--- 导入路径和别名
+	probetool "probetool/lib"
 )
 
 // serverState 是指向 probetool.ServerState 实例的全局变量，用于桌面应用。
 var serverState *probetool.ServerState
 
 func main() {
-	// 1. 设置主应用程序的日志输出 (初始为标准错误/输出)
+	// 设置主应用程序的日志输出 (初始为标准错误/输出)
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Println("Starting Probe Tool Desktop Application...")
 
-	// 2. 定义桌面版本的路径
+	// 定义桌面版本的路径
 	exePath, err := os.Executable()
 	if err != nil {
 		log.Fatalf("Failed to get executable path: %v", err)
@@ -43,41 +43,49 @@ func main() {
 		}
 	}
 
-	// 3. 为主应用程序创建并初始化 ServerState
-	serverState = probetool.NewServerState(logDir, ftpRootDir, staticDir, "Local") // 使用 probetool.NewServerState
+	// 创建并初始化 ServerState
+	serverState = probetool.NewServerState(logDir, ftpRootDir, staticDir, "Local")
 
-	// 4. 尽早打开日志文件，确保后续所有启动步骤（包括崩溃）都记录到文件
-	if err := serverState.InitLogFile(); err != nil {
+	// 在日志重定向之前，把启动参数打到控制台（不进日志文件）
+	url := fmt.Sprintf("http://127.0.0.1:%d", probetool.HTTPPort)
+	fmt.Fprintf(os.Stderr, "Probe Web Tool started\n")
+	fmt.Fprintf(os.Stderr, "  Log dir:    %s\n", logDir)
+	fmt.Fprintf(os.Stderr, "  FTP root:   %s\n", ftpRootDir)
+	fmt.Fprintf(os.Stderr, "  Static dir: %s\n", staticDir)
+	fmt.Fprintf(os.Stderr, "  Timezone:   Local\n")
+	fmt.Fprintf(os.Stderr, "  URL:        %s\n", url)
+	fmt.Fprintf(os.Stderr, "  FTP:        ftp://127.0.0.1:%d\n", probetool.FTPPort)
+	fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop.\n")
+
+	// 尽早打开日志文件，确保后续所有启动步骤（包括崩溃）都记录到文件
+	err = serverState.InitLogFile()
+	if err != nil {
 		log.Fatalf("Failed to initialize log file: %v", err)
 	}
 
-	// 5. 启动所有核心服务
-	if err := serverState.StartLogServer(); err != nil { // 启动 UDP 日志服务器
+	// 启动所有核心服务
+	if err := serverState.StartLogServer(); err != nil {
 		log.Fatalf("Failed to start log server: %v", err)
 	}
-	serverState.StartFTPServer()        // 通过实例调用方法
-	serverState.StartHTTPAndWSServers() // 通过实例调用方法
-	go serverState.PerformTimedScan()   // 通过实例调用方法
+	serverState.StartFTPServer()
+	serverState.StartHTTPAndWSServers()
+	go serverState.PerformTimedScan()
 
-	// 6. 自动打开浏览器
+	// 自动打开浏览器
 	go func() {
-		time.Sleep(1 * time.Second)                                   // 等待服务器启动
-		url := fmt.Sprintf("http://127.0.0.1:%d", probetool.HTTPPort) // 使用 probetool.HTTPPort
-		log.Printf("Opening browser to %s", url)
+		time.Sleep(1 * time.Second)
 		if err := browser.OpenURL(url); err != nil {
 			log.Printf("Failed to open browser: %v", err)
 		}
 	}()
 
-	// 7. 设置操作系统信号的优雅关闭
+	// 等待关闭信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	log.Printf("Desktop application running. Press Ctrl+C to stop.")
-	<-sigChan // 阻塞直到接收到信号
+	<-sigChan
 	log.Println("Shutting down Probe Tool Desktop Application...")
 
-	// 8. 优雅关闭序列
+	// 优雅关闭序列
 	serverState.StopLogServer()
 	serverState.StopFTPServer()
 	serverState.StopHTTPAndWSServers()

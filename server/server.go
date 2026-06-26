@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -11,7 +13,7 @@ import (
 
 // androidGlobalServerState is the single instance of probetoollib.ServerState
 // managed by this Android binding package.
-var androidGlobalServerState *probetoollib.ServerState // <--- 使用 probetoollib.ServerState
+var androidGlobalServerState *probetoollib.ServerState
 var androidGlobalServerStateMutex sync.Mutex           // Protects access to androidGlobalServerState
 
 // Start initializes and starts the Go backend services.
@@ -32,7 +34,7 @@ func Start(logDir, ftpRootDir, staticDir, timezone string) {
 		return
 	}
 
-	// 1. Set global timezone for Go's time package
+	// Set global timezone for Go's time package
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
 		log.Printf("Warning: Could not load timezone %s, defaulting to UTC: %v", timezone, err)
@@ -40,18 +42,25 @@ func Start(logDir, ftpRootDir, staticDir, timezone string) {
 	}
 	time.Local = loc // Set default local timezone for all Go code
 
-	// 2. Initialize ServerState with provided paths
-	androidGlobalServerState = probetoollib.NewServerState(logDir, ftpRootDir, staticDir, timezone) // <--- 使用 probetoollib.NewServerState
+	// Initialize ServerState with provided paths
+	androidGlobalServerState = probetoollib.NewServerState(logDir, ftpRootDir, staticDir, timezone)
 
-	// 3. 尽早打开日志文件，确保后续所有启动步骤（包括崩溃）都记录到文件
+	// 在日志重定向之前，把启动参数打到控制台（不进日志文件）
+	fmt.Fprintf(os.Stderr, "Probe Tool Service starting\n")
+	fmt.Fprintf(os.Stderr, "  Log dir:    %s\n", logDir)
+	fmt.Fprintf(os.Stderr, "  FTP root:   %s\n", ftpRootDir)
+	fmt.Fprintf(os.Stderr, "  Static dir: %s\n", staticDir)
+	fmt.Fprintf(os.Stderr, "  Timezone:   %s\n", timezone)
+
+	// 尽早打开日志文件，确保后续所有启动步骤（包括崩溃）都记录到文件
 	if err := androidGlobalServerState.InitLogFile(); err != nil {
 		log.Printf("Failed to initialize log file: %v", err)
 		androidGlobalServerState = nil
 		return
 	}
 
-	// 4. Start core services
-	if err := androidGlobalServerState.StartLogServer(); err != nil { // <--- 通过实例调用方法
+	// Start core services
+	if err := androidGlobalServerState.StartLogServer(); err != nil {
 		log.Printf("Failed to start log server: %v", err)
 		androidGlobalServerState = nil
 		return
@@ -60,7 +69,7 @@ func Start(logDir, ftpRootDir, staticDir, timezone string) {
 	androidGlobalServerState.StartHTTPAndWSServers()
 	go androidGlobalServerState.PerformTimedScan()
 
-	log.Printf("Probe Tool Service started successfully. LogDir: %s, FTPRoot: %s, StaticDir: %s, Timezone: %s", logDir, ftpRootDir, staticDir, timezone)
+	log.Printf("Probe Tool Service started successfully.")
 }
 
 // Stop gracefully shuts down all Go backend services.
