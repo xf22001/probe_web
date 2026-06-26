@@ -71,7 +71,6 @@ func main() {
 	log.Println("Shutting down Probe Tool Desktop Application...")
 
 	// 7. 优雅关闭序列
-	serverState.StopContinuousScanner()
 	serverState.StopLogServer()
 	serverState.StopFTPServer()
 	serverState.StopHTTPAndWSServers()

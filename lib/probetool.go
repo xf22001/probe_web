@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ftpserver "github.com/fclairamb/ftpserverlib"
@@ -52,6 +53,12 @@ const (
 	PayloadInfoSize     = 8                            // fn(4) + stage(4)
 	RequestTSize        = HeaderSize + PayloadInfoSize // 25 bytes total protocol header
 )
+
+// PayloadInfo holds the decoded fn and stage from a request.
+type PayloadInfo struct {
+	Fn    uint32
+	Stage uint32
+}
 
 func CalcCRC8(data []byte) uint8 {
 	var crc uint8 = 0
@@ -114,7 +121,9 @@ func EncodeRequest(fn uint32, stage uint32, data []byte) [][]byte {
 
 		fragmentData := data[offset : offset+currentFragmentSize]
 
-		crcData := append(payloadBytes, fragmentData...)
+		crcData := make([]byte, 0, len(payloadBytes)+len(fragmentData))
+		crcData = append(crcData, payloadBytes...)
+		crcData = append(crcData, fragmentData...)
 		crc := CalcCRC8(crcData)
 
 		header := encodeHeader(DefaultRequestMagic, totalDataSize, currentFragmentSize, offset, crc)
@@ -132,9 +141,9 @@ func EncodeRequest(fn uint32, stage uint32, data []byte) [][]byte {
 }
 
 // DecodeRequest now returns additional header fields: totalSize, dataSize, dataOffset.
-func DecodeRequest(buffer []byte) (map[string]interface{}, uint32, uint32, uint32, []byte, error) {
+func DecodeRequest(buffer []byte) (PayloadInfo, uint32, uint32, uint32, []byte, error) {
 	if len(buffer) < RequestTSize {
-		return nil, 0, 0, 0, nil, fmt.Errorf("incomplete buffer, length %d < %d", len(buffer), RequestTSize)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("incomplete buffer, length %d < %d", len(buffer), RequestTSize)
 	}
 
 	headerBytes := buffer[:HeaderSize]
@@ -146,58 +155,58 @@ func DecodeRequest(buffer []byte) (map[string]interface{}, uint32, uint32, uint3
 	// Use a single reader for efficiency
 	reader := bytes.NewReader(headerBytes)
 	if err := binary.Read(reader, binary.LittleEndian, &magic); err != nil {
-		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read magic: %v", err)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("failed to read magic: %v", err)
 	}
 	if err := binary.Read(reader, binary.LittleEndian, &totalSize); err != nil {
-		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read totalSize: %v", err)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("failed to read totalSize: %v", err)
 	}
 	if err := binary.Read(reader, binary.LittleEndian, &dataSize); err != nil {
-		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read dataSize: %v", err)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("failed to read dataSize: %v", err)
 	}
 	if err := binary.Read(reader, binary.LittleEndian, &dataOffset); err != nil {
-		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read dataOffset: %v", err)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("failed to read dataOffset: %v", err)
 	}
 	if err := binary.Read(reader, binary.LittleEndian, &crcReceived); err != nil {
-		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read crc: %v", err)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("failed to read crc: %v", err)
 	}
 
 	if magic != DefaultRequestMagic {
-		return nil, 0, 0, 0, nil, fmt.Errorf("invalid magic 0x%x, expected 0x%x", magic, uint32(DefaultRequestMagic))
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("invalid magic 0x%x, expected 0x%x", magic, uint32(DefaultRequestMagic))
 	}
 
 	// Input validation to prevent potential attacks
 	if dataSize > MaxFragmentPayloadSize {
-		return nil, 0, 0, 0, nil, fmt.Errorf("dataSize too large: %d, max allowed: %d", dataSize, MaxFragmentPayloadSize)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("dataSize too large: %d, max allowed: %d", dataSize, MaxFragmentPayloadSize)
 	}
 
 	if totalSize > 1024*1024 { // Limit total message size to 1MB to prevent memory exhaustion
-		return nil, 0, 0, 0, nil, fmt.Errorf("totalSize too large: %d, max allowed: %d", totalSize, 1024*1024)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("totalSize too large: %d, max allowed: %d", totalSize, 1024*1024)
 	}
 
 	if len(buffer) < int(RequestTSize+dataSize) {
-		return nil, 0, 0, 0, nil, fmt.Errorf("incomplete data payload (expected %d bytes, got %d in buffer after header)", dataSize, len(buffer)-RequestTSize)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("incomplete data payload (expected %d bytes, got %d in buffer after header)", dataSize, len(buffer)-RequestTSize)
 	}
 
 	if totalSize > 0 && dataOffset+dataSize > totalSize {
-		return nil, 0, 0, 0, nil, fmt.Errorf("fragment range out of total bounds: offset %d, size %d, total %d", dataOffset, dataSize, totalSize)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("fragment range out of total bounds: offset %d, size %d, total %d", dataOffset, dataSize, totalSize)
 	}
 
 	actualDataBytes := buffer[RequestTSize : RequestTSize+int(dataSize)]
 	crcData := append(payloadInfoBytes, actualDataBytes...)
 	if crcReceived != CalcCRC8(crcData) {
-		return nil, 0, 0, 0, nil, fmt.Errorf("invalid crc, calculated 0x%x, received 0x%x", CalcCRC8(crcData), crcReceived)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("invalid crc, calculated 0x%x, received 0x%x", CalcCRC8(crcData), crcReceived)
 	}
 
 	var fn, stage uint32
 	payloadReader := bytes.NewReader(payloadInfoBytes)
 	if err := binary.Read(payloadReader, binary.LittleEndian, &fn); err != nil {
-		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read fn: %v", err)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("failed to read fn: %v", err)
 	}
 	if err := binary.Read(payloadReader, binary.LittleEndian, &stage); err != nil {
-		return nil, 0, 0, 0, nil, fmt.Errorf("failed to read stage: %v", err)
+		return PayloadInfo{}, 0, 0, 0, nil, fmt.Errorf("failed to read stage: %v", err)
 	}
 
-	return map[string]interface{}{"fn": fn, "stage": stage}, totalSize, dataSize, dataOffset, actualDataBytes, nil
+	return PayloadInfo{Fn: fn, Stage: stage}, totalSize, dataSize, dataOffset, actualDataBytes, nil
 }
 
 // ==========================================
@@ -248,18 +257,17 @@ func (r *Reassembler) cleanupRoutine() {
 			r.mu.RUnlock()
 
 			if currentMsg != nil {
-				currentMsg.mu.Lock() // Lock the message first
-				r.mu.Lock() // Then lock the reassembler to safely access currentMessage
-
-				// Double-check that the message hasn't changed while acquiring locks
-				if r.currentMessage == currentMsg && time.Since(currentMsg.LastUpdateTime) > r.timeout {
-					log.Printf("Reassembler: Cleaning up timed out partial message (fn: %d, stage: %d, totalSize: %d)",
-						currentMsg.Fn, currentMsg.Stage, currentMsg.TotalSize)
-					r.currentMessage = nil // Clear the timed-out message
+				r.mu.Lock() // Lock reassembler first (consistent with Clear())
+				if r.currentMessage == currentMsg {
+					currentMsg.mu.Lock() // Then lock the message
+					if time.Since(currentMsg.LastUpdateTime) > r.timeout {
+						log.Printf("Reassembler: Cleaning up timed out partial message (fn: %d, stage: %d, totalSize: %d)",
+							currentMsg.Fn, currentMsg.Stage, currentMsg.TotalSize)
+						r.currentMessage = nil // Clear the timed-out message
+					}
+					currentMsg.mu.Unlock() // Unlock message
 				}
-
 				r.mu.Unlock() // Unlock reassembler
-				currentMsg.mu.Unlock() // Unlock message
 			}
 		case <-r.stopCleanupChan:
 			return
@@ -278,9 +286,10 @@ func (r *Reassembler) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.currentMessage != nil {
-		r.currentMessage.mu.Lock() // Lock to safely clear
+		msg := r.currentMessage
+		msg.mu.Lock() // Lock to safely clear
 		r.currentMessage = nil
-		r.currentMessage.mu.Unlock()
+		msg.mu.Unlock()
 		log.Println("Reassembler: Cleared current message state.")
 	}
 }
@@ -361,7 +370,7 @@ func (r *Reassembler) AddFragment(ip string, fn, stage, totalSize, dataSize, dat
 
 	// Copy fragment data into the correct position in the reassembly buffer
 	copy(pm.ReceivedData[dataOffset:dataOffset+dataSize], fragmentData)
-	for i := uint32(0); i < dataSize; i++ {
+	for i := range dataSize {
 		if dataOffset+i < pm.TotalSize { // Boundary check
 			setBit(pm.ReceivedMask, dataOffset+i) // Mark these bytes as received
 		} else {
@@ -450,8 +459,10 @@ type ServerState struct {
 	DeviceLock    sync.Mutex
 
 	// Control Channels
-	ScannerStopChan   chan struct{}
 	LogServerStopChan chan struct{}
+
+	// Atomic flags for thread-safe status queries
+	logRunning atomic.Bool
 
 	// Timed Scan Logic
 	ActiveScanResults map[string]bool
@@ -463,10 +474,6 @@ type ServerState struct {
 	// HTTP/WS Server instances for graceful shutdown
 	httpServer *http.Server
 	wsServer   *http.Server
-
-	// Use a single mutex for the entire ServerState for simplicity in this global setup
-	// although finer-grained locks are used for sub-components (DevicesLock, LogLock, etc.)
-	mu sync.Mutex
 }
 
 // NewServerState creates a new instance of ServerState.
@@ -489,10 +496,7 @@ func (s *ServerState) StartHTTPAndWSServers() {
 	// HTTP Server
 	httpMux := http.NewServeMux()
 	httpMux.Handle("/", http.FileServer(http.Dir(s.StaticDir))) // Serve static files from provided path
-	httpMux.HandleFunc("/api/scanner/start", s.handleScannerStart)
-	httpMux.HandleFunc("/api/scanner/stop", s.handleScannerStop)
 	httpMux.HandleFunc("/api/scanner/refresh", s.handleScan)
-	httpMux.HandleFunc("/api/scanner/status", s.handleScannerStatus)
 	httpMux.HandleFunc("/api/log/start", s.handleLogStart)
 	httpMux.HandleFunc("/api/log/stop", s.handleLogStop)
 	httpMux.HandleFunc("/api/log/status", s.handleLogStatus)
@@ -583,6 +587,7 @@ func (s *ServerState) StartLogServer() error {
 
 	stopChan := make(chan struct{})
 	s.LogServerStopChan = stopChan
+	s.logRunning.Store(true)
 
 	go func() {
 		defer file.Close()
@@ -628,6 +633,7 @@ func (s *ServerState) StopLogServer() error {
 	}
 	close(s.LogServerStopChan)
 	s.LogServerStopChan = nil
+	s.logRunning.Store(false)
 	// Restore default logger output to stderr/stdout
 	log.SetOutput(os.Stderr)
 	return nil
@@ -642,7 +648,7 @@ func (s *ServerState) PushDevicesSnapshot() {
 	}
 	s.DevicesLock.RUnlock()
 
-	payload, _ := json.Marshal(map[string]interface{}{"type": "devices", "data": list})
+	payload, _ := json.Marshal(map[string]any{"type": "devices", "data": list})
 	s.DeviceLock.Lock()
 	for ws := range s.DeviceClients {
 		if err := ws.WriteMessage(websocket.TextMessage, payload); err != nil {
@@ -765,57 +771,6 @@ func sanitizeDeviceID(id string) string {
 	return sanitized.String()
 }
 
-// StartContinuousScanner starts the continuous UDP broadcast scanner.
-func (s *ServerState) StartContinuousScanner() error {
-	if s.ScannerStopChan != nil {
-		return fmt.Errorf("scanner already running")
-	}
-
-	// Reset the active scan results to start tracking for this new session.
-	s.ActiveScanLock.Lock()
-	s.ActiveScanResults = make(map[string]bool)
-	s.ActiveScanLock.Unlock()
-
-	stopChan := make(chan struct{})
-	s.ScannerStopChan = stopChan
-	go s.RunUdpListener(stopChan)
-	log.Println("Continuous scanner started.")
-	return nil
-}
-
-// StopContinuousScanner stops the continuous UDP broadcast scanner.
-func (s *ServerState) StopContinuousScanner() error {
-	if s.ScannerStopChan == nil {
-		return fmt.Errorf("scanner not running")
-	}
-	close(s.ScannerStopChan)
-	s.ScannerStopChan = nil
-	log.Println("Continuous scanner stopped.")
-
-	// After stopping, perform cleanup based on the results of the scan session.
-	s.DevicesLock.Lock()
-	s.ActiveScanLock.Lock() // Lock both to be safe
-
-	ipsToRemove := []string{}
-	for ip, dev := range s.Devices {
-		// If a device is "Available" but was not found in the scan session that just ended, remove it.
-		// "Connected" devices are NEVER removed by this logic.
-		if dev.Status == "Available" && !s.ActiveScanResults[ip] {
-			ipsToRemove = append(ipsToRemove, ip)
-		}
-	}
-	for _, ip := range ipsToRemove {
-		delete(s.Devices, ip)
-		log.Printf("Removing stale device after continuous scan: %s", ip)
-	}
-
-	s.ActiveScanLock.Unlock()
-	s.DevicesLock.Unlock()
-
-	go s.PushDevicesSnapshot() // Push the cleaned list to clients
-
-	return nil
-}
 
 // PerformTimedScan performs a single 5-second scan.
 func (s *ServerState) PerformTimedScan() {
@@ -825,18 +780,12 @@ func (s *ServerState) PerformTimedScan() {
 	s.ActiveScanResults = make(map[string]bool)
 	s.ActiveScanLock.Unlock()
 
-	var tempStopChan chan struct{}
-
-	if s.ScannerStopChan == nil { // Only start a temporary listener if continuous is not running
-		tempStopChan = make(chan struct{})
-		go s.RunUdpListener(tempStopChan)
-	}
+	stopChan := make(chan struct{})
+	go s.RunUdpListener(stopChan)
 
 	time.Sleep(5 * time.Second)
 
-	if tempStopChan != nil {
-		close(tempStopChan) // Stop temporary listener
-	}
+	close(stopChan)
 
 	s.DevicesLock.Lock()
 	s.ActiveScanLock.Lock()
@@ -880,9 +829,7 @@ func (s *ServerState) ConnectToDevice(ip string) (string, error) {
 	s.Connections[ip] = dc
 
 	// Send periodic keep-alive/probe packets
-	dc.WG.Add(1)
-	go func() {
-		defer dc.WG.Done()
+	dc.WG.Go(func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -890,20 +837,16 @@ func (s *ServerState) ConnectToDevice(ip string) (string, error) {
 			case <-stopChan:
 				return
 			case <-ticker.C:
-				// Use dc.Send method to send, it handles fragmentation internally
 				err := dc.Send(0xFFFFFFFF, 0, []byte{0x00})
 				if err != nil {
 					log.Printf("Error sending keep-alive to %s: %v", ip, err)
-					// Decide if you want to disconnect on send error or just log
 				}
 			}
 		}
-	}()
+	})
 
 	// Read responses and use the DeviceConnection's internal Reassembler
-	dc.WG.Add(1)
-	go func() {
-		defer dc.WG.Done()
+	dc.WG.Go(func() {
 		buf := make([]byte, 4096) // Buffer size should be large enough to receive any single UDP packet
 		for {
 			select {
@@ -933,8 +876,8 @@ func (s *ServerState) ConnectToDevice(ip string) (string, error) {
 					continue
 				}
 
-				fn := info["fn"].(uint32)
-				stage := info["stage"].(uint32)
+				fn := info.Fn
+				stage := info.Stage
 
 				// Pass the fragment data to the connection's internal Reassembler.
 				// The 'ip' parameter for AddFragment is mainly for logging context within Reassembler.
@@ -959,7 +902,7 @@ func (s *ServerState) ConnectToDevice(ip string) (string, error) {
 				// The reassembler handles logging for timeouts.
 			}
 		}
-	}()
+	})
 
 	s.DevicesLock.Lock()
 	if _, ok := s.Devices[ip]; !ok {
@@ -1085,37 +1028,32 @@ func (s *ServerState) StopFTPServer() {
 // ==========================================
 
 // sendJSON helper is not a method, it can remain a package-level function
-func sendJSON(w http.ResponseWriter, data interface{}) {
+func sendJSON(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
 }
 
-func (s *ServerState) handleScannerStart(w http.ResponseWriter, r *http.Request) {
-	if err := s.StartContinuousScanner(); err != nil {
-		sendJSON(w, map[string]string{"status": err.Error()})
-	} else {
-		sendJSON(w, map[string]string{"status": "scanner_started"})
+// requirePOST returns true if the request method is POST; otherwise writes 405 and returns false.
+func requirePOST(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		sendJSON(w, map[string]string{"status": "error", "reason": "method not allowed"})
+		return false
 	}
+	return true
 }
-func (s *ServerState) handleScannerStop(w http.ResponseWriter, r *http.Request) {
-	if err := s.StopContinuousScanner(); err != nil {
-		sendJSON(w, map[string]string{"status": err.Error()})
-	} else {
-		sendJSON(w, map[string]string{"status": "scanner_stopped"})
-	}
-}
+
 func (s *ServerState) handleScan(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
 	go s.PerformTimedScan()
 	sendJSON(w, map[string]string{"status": "timed_scan_initiated"})
 }
-func (s *ServerState) handleScannerStatus(w http.ResponseWriter, r *http.Request) {
-	st := "stopped"
-	if s.ScannerStopChan != nil {
-		st = "running"
-	}
-	sendJSON(w, map[string]string{"scanner_status": st})
-}
 func (s *ServerState) handleLogStart(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
 	if err := s.StartLogServer(); err != nil {
 		sendJSON(w, map[string]string{"status": err.Error()})
 	} else {
@@ -1123,6 +1061,9 @@ func (s *ServerState) handleLogStart(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func (s *ServerState) handleLogStop(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
 	if err := s.StopLogServer(); err != nil {
 		sendJSON(w, map[string]string{"status": err.Error()})
 	} else {
@@ -1131,16 +1072,28 @@ func (s *ServerState) handleLogStop(w http.ResponseWriter, r *http.Request) {
 }
 func (s *ServerState) handleLogStatus(w http.ResponseWriter, r *http.Request) {
 	st := "stopped"
-	if s.LogServerStopChan != nil {
+	if s.logRunning.Load() {
 		st = "running"
 	}
 	sendJSON(w, map[string]string{"log_server_status": st})
 }
 func (s *ServerState) handleConnect(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
 	var b struct {
 		IP string `json:"ip"`
 	}
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		sendJSON(w, map[string]string{"status": "error", "reason": "invalid request body"})
+		return
+	}
+	if b.IP == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		sendJSON(w, map[string]string{"status": "error", "reason": "ip is required"})
+		return
+	}
 	if lIP, err := s.ConnectToDevice(b.IP); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		sendJSON(w, map[string]string{"status": "error", "reason": err.Error()})
@@ -1149,16 +1102,31 @@ func (s *ServerState) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func (s *ServerState) handleDisconnect(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
 	var b struct {
 		IP string `json:"ip"`
 	}
-	json.NewDecoder(r.Body).Decode(&b)
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		sendJSON(w, map[string]string{"status": "error", "reason": "invalid request body"})
+		return
+	}
+	if b.IP == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		sendJSON(w, map[string]string{"status": "error", "reason": "ip is required"})
+		return
+	}
 	s.DisconnectFromDevice(b.IP)
 	sendJSON(w, map[string]string{"status": "disconnected"})
 }
 
 // handleSend now uses DeviceConnection's Send method, encapsulating fragmentation logic
 func (s *ServerState) handleSend(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
 	var b struct {
 		IP         string `json:"ip"`
 		Fn         int    `json:"fn"`
@@ -1199,11 +1167,14 @@ func (s *ServerState) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sendJSON(w, map[string]interface{}{"status": "sent", "fragments_sent_by_system": len(EncodeRequest(uint32(b.Fn), uint32(b.Stage), raw))})
+	sendJSON(w, map[string]any{"status": "sent", "fragments_sent_by_system": len(EncodeRequest(uint32(b.Fn), uint32(b.Stage), raw))})
 }
 
 // handleBatchSend handles sending multiple commands to one or more devices
 func (s *ServerState) handleBatchSend(w http.ResponseWriter, r *http.Request) {
+	if !requirePOST(w, r) {
+		return
+	}
 	var batchReq struct {
 		Commands []struct {
 			IP    string `json:"ip"`
@@ -1220,10 +1191,10 @@ func (s *ServerState) handleBatchSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := make([]map[string]interface{}, 0)
+	results := make([]map[string]any, 0)
 
 	for _, cmd := range batchReq.Commands {
-		result := map[string]interface{}{"ip": cmd.IP, "text": cmd.Text}
+		result := map[string]any{"ip": cmd.IP, "text": cmd.Text}
 
 		var finalFn, finalStage int
 		var dataPayload []byte
@@ -1297,7 +1268,7 @@ func (s *ServerState) handleBatchSend(w http.ResponseWriter, r *http.Request) {
 		results = append(results, result)
 	}
 
-	sendJSON(w, map[string]interface{}{"results": results})
+	sendJSON(w, map[string]any{"results": results})
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
@@ -1323,7 +1294,8 @@ func (s *ServerState) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if reg.Type == "log" {
+	switch reg.Type {
+	case "log":
 		s.LogLock.Lock()
 		s.LogClients[ws] = true
 		s.LogLock.Unlock()
@@ -1334,7 +1306,7 @@ func (s *ServerState) handleWS(w http.ResponseWriter, r *http.Request) {
 			log.Println("Log client disconnected")
 		}()
 		log.Println("Log client connected")
-	} else if reg.Type == "devices" {
+	case "devices":
 		s.DeviceLock.Lock()
 		s.DeviceClients[ws] = true
 		s.DeviceLock.Unlock()
@@ -1346,7 +1318,7 @@ func (s *ServerState) handleWS(w http.ResponseWriter, r *http.Request) {
 			log.Println("Device client disconnected")
 		}()
 		log.Println("Device client connected")
-	} else {
+	default:
 		log.Printf("Unknown WebSocket registration type: %s", reg.Type)
 		return
 	}

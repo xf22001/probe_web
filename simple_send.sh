@@ -104,7 +104,7 @@ echo "-------------------------------------"
 echo 
 
 # 检查服务器连通性
-if ! curl -s --connect-timeout 5 "$PROBE_SERVER_URL/api/scanner/status" >/dev/null 2>&1; then
+if ! curl -s --connect-timeout 5 "$PROBE_SERVER_URL/api/log/status" >/dev/null 2>&1; then
     echo "错误: 无法连接到服务器 $PROBE_SERVER_URL" >&2
     echo "请确保Probe Web Tool服务正在运行。" >&2
     exit 1

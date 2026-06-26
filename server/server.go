@@ -74,7 +74,6 @@ func Stop() {
 	log.Println("Shutting down Probe Tool Service from Android...")
 
 	// Graceful shutdown sequence
-	androidGlobalServerState.StopContinuousScanner()
 	androidGlobalServerState.StopLogServer()
 	androidGlobalServerState.StopFTPServer()
 	androidGlobalServerState.StopHTTPAndWSServers()

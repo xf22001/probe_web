@@ -1,0 +1,16 @@
+# Compiled binary
+probetool
+*.exe
+*.aar
+
+# Runtime directories
+logs/
+ftp_share/
+
+# Go build artifacts
+*.test
+*.out
+
+# OS files
+.DS_Store
+Thumbs.db

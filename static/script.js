@@ -50,19 +50,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    const startScannerButton = document.getElementById('startScannerButton');
-    const stopScannerButton = document.getElementById('stopScannerButton');
     const scanButton = document.getElementById('scanButton');
     const deviceList = document.getElementById('deviceList');
-    const scannerLoadingIndicator = document.getElementById('scannerLoadingIndicator');
-
-    // Note: deviceSelect element has been removed from HTML, but we keep the variable for compatibility
-    // All device selection now happens through the device list
-    const deviceSelect = document.getElementById('deviceSelect'); // Will be null after HTML removal
-    const connectButton = document.getElementById('connectButton');
-    const disconnectButton = document.getElementById('disconnectButton');
-    const connectionInfo = document.getElementById('connectionInfo');
-    const connectionLoadingIndicator = document.getElementById('connectionLoadingIndicator');
 
     const commandInput = document.getElementById('commandInput');
     const sendCommandButton = document.getElementById('sendCommandButton');
@@ -82,11 +71,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentDevices = [];
     let selectedDeviceIp = null;  // Track selected device from list
-    let scannerIsRunning = false;
     let logServerIsRunning = false;
     let isManualScanInProgress = false;
     let isSingleScanInProgress = false;
-    let scanRequestId = null;  // Unique ID for the current scan request
     let isSidePanelCollapsed = false;
     const SIDE_PANEL_STATE_KEY = 'probe_tool_side_panel_collapsed';
 
@@ -100,16 +87,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showError(message) {
-        errorMessage.innerHTML = `
-            <span>${message}</span>
-            <button class="close-btn" aria-label="Close error message">&times;</button>
-        `;
-        errorMessage.style.display = 'block';
-
-        const closeBtn = errorMessage.querySelector('.close-btn');
+        errorMessage.textContent = '';
+        const span = document.createElement('span');
+        span.textContent = message;
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'close-btn';
+        closeBtn.setAttribute('aria-label', 'Close error message');
+        closeBtn.textContent = '×';
         closeBtn.addEventListener('click', () => {
             errorMessage.style.display = 'none';
         });
+        errorMessage.appendChild(span);
+        errorMessage.appendChild(closeBtn);
+        errorMessage.style.display = 'block';
 
         setTimeout(() => {
             errorMessage.style.display = 'none';
@@ -137,7 +127,6 @@ document.addEventListener('DOMContentLoaded', () => {
         wsDevices.onopen = () => {
             // Connected to Device WebSocket. Sending registration...
             wsDevices.send(JSON.stringify({ type: 'devices' }));
-            fetchScannerStatus();
             fetchLogServerStatus();
         };
 
@@ -147,8 +136,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (message.type === 'devices') {
                     const newDevices = message.data;
 
-                    // 检查设备列表是否有实际变化，避免不必要的UI更新
-                    const hasChanges = JSON.stringify(currentDevices) !== JSON.stringify(newDevices);
                     currentDevices = newDevices;
 
                     if (isManualScanInProgress) {
@@ -156,7 +143,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         updateDeviceSelect(currentDevices);
                         isManualScanInProgress = false;
                         isSingleScanInProgress = false;
-                        scanRequestId = null;
                     } else {
                         debouncedUpdateDeviceUI();
                     }
@@ -307,7 +293,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const spanDelete = document.createElement('span');
             spanDelete.className = 'history-delete-btn';
-            spanDelete.innerHTML = '&times;';
+            spanDelete.textContent = '×';
             spanDelete.title = 'Remove from history';
             spanDelete.addEventListener('click', (e) => deleteHistoryItem(e, index));
 
@@ -334,7 +320,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 !commandHistoryList.contains(document.activeElement)) {
                 commandHistoryList.style.display = 'none';
             }
-        }, 150); // 150ms延迟，允许用户点击历史项
+        }, 300); // 300ms延迟，兼容触摸板（触摸板点击比鼠标慢）
     });
 
     document.addEventListener('click', (e) => {
@@ -391,9 +377,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateScannerButtons() {
         updateButtonStates({
-            'startScannerButton': scannerIsRunning || isSingleScanInProgress,
-            'stopScannerButton': !scannerIsRunning || isSingleScanInProgress,
-            'scanButton': scannerIsRunning || isSingleScanInProgress
+            'scanButton': isSingleScanInProgress
         });
     }
 
@@ -414,7 +398,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateDeviceList(devices) {
         deviceList.innerHTML = '';
         if (!devices || devices.length === 0) {
-            deviceList.innerHTML = '<li>No devices found. Start scanner or click "Refresh Devices"</li>';
+            deviceList.innerHTML = '<li>No devices found. Click "Refresh Devices" to scan.</li>';
             updateDiscoveredDevicesCount(0);
             selectedDeviceIp = null;
             updateDeviceControlButtons();
@@ -440,14 +424,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 const controlDiv = document.createElement('div');
                 controlDiv.className = 'device-control-div';
                 controlDiv.style.display = 'none';
-                controlDiv.innerHTML = `
-                    <div class="button-group">
-                        <button class="device-connect-btn" data-ip="${device.ip}" aria-label="Connect to selected device">Connect</button>
-                        <button class="device-disconnect-btn" data-ip="${device.ip}" aria-label="Disconnect from device">Disconnect</button>
-                        <div class="device-connection-loading loading-indicator" style="display: none;" aria-live="polite">Connecting...</div>
-                    </div>
-                    <p class="device-connection-info info-text"></p>
-                `;
+
+                const btnGroup = document.createElement('div');
+                btnGroup.className = 'button-group';
+                const connectBtn = document.createElement('button');
+                connectBtn.className = 'device-connect-btn';
+                connectBtn.setAttribute('aria-label', 'Connect to selected device');
+                connectBtn.textContent = 'Connect';
+                const disconnectBtn = document.createElement('button');
+                disconnectBtn.className = 'device-disconnect-btn';
+                disconnectBtn.setAttribute('aria-label', 'Disconnect from device');
+                disconnectBtn.textContent = 'Disconnect';
+                const connLoading = document.createElement('div');
+                connLoading.className = 'device-connection-loading loading-indicator';
+                connLoading.style.display = 'none';
+                connLoading.setAttribute('aria-live', 'polite');
+                connLoading.textContent = 'Connecting...';
+                btnGroup.appendChild(connectBtn);
+                btnGroup.appendChild(disconnectBtn);
+                btnGroup.appendChild(connLoading);
+                const connInfo = document.createElement('p');
+                connInfo.className = 'device-connection-info info-text';
+                controlDiv.appendChild(btnGroup);
+                controlDiv.appendChild(connInfo);
 
                 li.appendChild(controlDiv);
 
@@ -522,19 +521,6 @@ document.addEventListener('DOMContentLoaded', () => {
         updateDeviceControlButtons();
     }
 
-    async function fetchScannerStatus() {
-        try {
-            const response = await fetch('/api/scanner/status');
-            const data = await response.json();
-            scannerIsRunning = (data.scanner_status === 'running');
-            updateScannerButtons();
-        } catch (error) {
-            console.error('JS ERROR: Error fetching scanner status:', error);
-            scannerIsRunning = false; 
-            updateScannerButtons();
-        }
-    }
-
     async function fetchLogServerStatus() {
         try {
             const response = await fetch('/api/log/status');
@@ -592,86 +578,32 @@ document.addEventListener('DOMContentLoaded', () => {
             sendCommandButton.click();
         }
         
-        // Escape键关闭模态框和错误提示
+        // Escape键关闭错误提示
         if (event.key === 'Escape') {
-            if (confirmDialog.style.display === 'flex') {
-                confirmDialog.style.display = 'none';
-            }
             if (errorMessage.style.display === 'block') {
                 errorMessage.style.display = 'none';
             }
         }
     });
 
-    startScannerButton.addEventListener('click', async () => {
-        startScannerButton.disabled = true;
-        deviceList.innerHTML = '<li>Scanning for devices (continuous)...</li>';
-
-        // 保存当前选中的设备，以便在扫描期间保持连接状态
-        const currentlySelectedIp = selectedDeviceIp;
-        const currentlyConnectedDevices = currentDevices.filter(device => device.status === 'Connected');
-
-        currentDevices = [];
-
-        try {
-            const data = await apiRequest('/api/scanner/start', { method: 'POST' }, scannerLoadingIndicator);
-            if (data.status === 'scanner_started' || data.status === 'scanner_already_running') {
-                scannerIsRunning = true;
-            } else {
-                throw new Error(data.message || 'Failed to start scanner');
-            }
-        } catch (error) {
-            console.error('JS ERROR: Error starting continuous scanner:', error);
-            deviceList.innerHTML = '<li>Error starting scanner.</li>';
-            showError('Failed to start device scanner: ' + error.message);
-        } finally {
-            updateScannerButtons();
-        }
-    });
-
-    stopScannerButton.addEventListener('click', async () => {
-        stopScannerButton.disabled = true;
-        try {
-            const data = await apiRequest('/api/scanner/stop', { method: 'POST' }, scannerLoadingIndicator);
-            if (data.status === 'scanner_stopped' || data.status === 'scanner_not_running') {
-                scannerIsRunning = false;
-            } else {
-                throw new Error(data.message || 'Failed to stop scanner');
-            }
-        } catch (error) {
-            console.error('JS ERROR: Error stopping continuous scanner:', error);
-            showError('Failed to stop device scanner: ' + error.message);
-        } finally {
-            updateScannerButtons();
-        }
-    });
-
-
     scanButton.addEventListener('click', async () => {
         scanButton.disabled = true;
-        // 显示扫描状态
         deviceList.innerHTML = '<li>Scanning for devices (5 seconds)...</li>';
-
-        // 保存当前选中的设备，以便在扫描期间保持连接状态
-        const currentlySelectedIp = selectedDeviceIp;
-        const currentlyConnectedDevices = currentDevices.filter(device => device.status === 'Connected');
 
         currentDevices = [];
 
-        scanRequestId = Date.now();
         isManualScanInProgress = true;
         isSingleScanInProgress = true;
         updateScannerButtons();
 
         try {
-            await apiRequest('/api/scanner/refresh', { method: 'POST' }, scannerLoadingIndicator);
+            await apiRequest('/api/scanner/refresh', { method: 'POST' });
         } catch (error) {
             console.error('JS ERROR: Error initiating device list refresh:', error);
             deviceList.innerHTML = '<li>Error initiating scan.</li>';
             showError('Failed to initiate device scan: ' + error.message);
             isManualScanInProgress = false;
             isSingleScanInProgress = false;
-            scanRequestId = null;
             updateScannerButtons();
         } finally {
             updateScannerButtons();
@@ -883,7 +815,6 @@ document.addEventListener('DOMContentLoaded', () => {
     updateDeviceList(currentDevices); // 初始化设备列表
     updateDeviceSelect(currentDevices); // 初始化设备选择
     updateDiscoveredDevicesCount(currentDevices.length); // 初始化设备计数
-    fetchScannerStatus();
     fetchLogServerStatus();
     loadSidePanelState(); // 页面加载时加载侧边栏状态
     
