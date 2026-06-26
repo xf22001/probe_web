@@ -43,11 +43,16 @@ func Start(logDir, ftpRootDir, staticDir, timezone string) {
 	// 2. Initialize ServerState with provided paths
 	androidGlobalServerState = probetoollib.NewServerState(logDir, ftpRootDir, staticDir, timezone) // <--- 使用 probetoollib.NewServerState
 
-	// 3. Start core services
+	// 3. 尽早打开日志文件，确保后续所有启动步骤（包括崩溃）都记录到文件
+	if err := androidGlobalServerState.InitLogFile(); err != nil {
+		log.Printf("Failed to initialize log file: %v", err)
+		androidGlobalServerState = nil
+		return
+	}
+
+	// 4. Start core services
 	if err := androidGlobalServerState.StartLogServer(); err != nil { // <--- 通过实例调用方法
 		log.Printf("Failed to start log server: %v", err)
-		androidGlobalServerState.StopFTPServer()
-		androidGlobalServerState.StopHTTPAndWSServers()
 		androidGlobalServerState = nil
 		return
 	}

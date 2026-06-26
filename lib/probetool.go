@@ -460,9 +460,13 @@ type ServerState struct {
 
 	// Control Channels
 	LogServerStopChan chan struct{}
+	LogServerWg       sync.WaitGroup // Waits for the UDP log goroutine to exit
 
 	// Atomic flags for thread-safe status queries
 	logRunning atomic.Bool
+
+	// Log file handle, opened by InitLogFile() before services start
+	logFile *os.File
 
 	// Timed Scan Logic
 	ActiveScanResults map[string]bool
@@ -489,6 +493,29 @@ func NewServerState(logDir, ftpRootDir, staticDir, timezone string) *ServerState
 		DeviceClients:     make(map[*websocket.Conn]bool),
 		ActiveScanResults: make(map[string]bool),
 	}
+}
+
+// InitLogFile opens a log file and redirects Go's default logger to it.
+// Call this as early as possible (right after NewServerState) so that all
+// subsequent startup steps log to the file — including fatal errors.
+func (s *ServerState) InitLogFile() error {
+	if err := os.MkdirAll(s.LogDir, 0755); err != nil {
+		return fmt.Errorf("failed to create log directory %s: %v", s.LogDir, err)
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+	filename := filepath.Join(s.LogDir, fmt.Sprintf("session_log_%s.txt", timestamp))
+
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file %s: %v", filename, err)
+	}
+
+	s.logFile = file
+	log.SetOutput(file)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.Printf("Log file created: %s", filename)
+	return nil
 }
 
 // StartHTTPAndWSServers starts the HTTP and WebSocket servers.
@@ -565,32 +592,20 @@ func (s *ServerState) StartLogServer() error {
 		return fmt.Errorf("log server already running")
 	}
 
-	if _, err := os.Stat(s.LogDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(s.LogDir, 0755); err != nil { // Use MkdirAll for recursive creation
-			return fmt.Errorf("failed to create log directory %s: %v", s.LogDir, err)
+	file := s.logFile
+	if file == nil {
+		// Fallback: if InitLogFile was not called, open the file now
+		if err := s.InitLogFile(); err != nil {
+			return err
 		}
+		file = s.logFile
 	}
-
-	// Create a log file specific to the session or restart
-	timestamp := time.Now().Format("20060102_150405")
-	filename := filepath.Join(s.LogDir, fmt.Sprintf("session_log_%s.txt", timestamp))
-
-	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open log file %s: %v", filename, err)
-	}
-	log.Printf("Log file created: %s", filename)
-
-	// Redirect Go's default logger to this file
-	log.SetOutput(file)
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	stopChan := make(chan struct{})
 	s.LogServerStopChan = stopChan
 	s.logRunning.Store(true)
 
-	go func() {
-		defer file.Close()
+	s.LogServerWg.Go(func() {
 		addr := net.UDPAddr{Port: LogToolPort, IP: net.ParseIP("0.0.0.0")}
 		conn, err := net.ListenUDP("udp", &addr)
 		if err != nil {
@@ -622,7 +637,7 @@ func (s *ServerState) StartLogServer() error {
 				file.WriteString(formatted + "\n") // Write to file
 			}
 		}
-	}()
+	})
 	return nil
 }
 
@@ -632,9 +647,14 @@ func (s *ServerState) StopLogServer() error {
 		return fmt.Errorf("log server not running")
 	}
 	close(s.LogServerStopChan)
+	s.LogServerWg.Wait() // Wait for the UDP goroutine to finish all writes
 	s.LogServerStopChan = nil
 	s.logRunning.Store(false)
-	// Restore default logger output to stderr/stdout
+	// Close the log file and restore stderr
+	if s.logFile != nil {
+		s.logFile.Close()
+		s.logFile = nil
+	}
 	log.SetOutput(os.Stderr)
 	return nil
 }
