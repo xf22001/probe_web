@@ -650,12 +650,12 @@ func (s *ServerState) StopLogServer() error {
 	s.LogServerWg.Wait() // Wait for the UDP goroutine to finish all writes
 	s.LogServerStopChan = nil
 	s.logRunning.Store(false)
-	// Close the log file and restore stderr
+	// Restore stderr and close the log file
+	log.SetOutput(os.Stderr)
 	if s.logFile != nil {
 		s.logFile.Close()
 		s.logFile = nil
 	}
-	log.SetOutput(os.Stderr)
 	return nil
 }
 
