@@ -2,6 +2,7 @@
 probetool
 *.exe
 *.aar
+*.xcframework
 
 # Runtime directories
 logs/
