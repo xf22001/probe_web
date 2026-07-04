@@ -57,18 +57,10 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  FTP:        ftp://127.0.0.1:%d\n", probetool.FTPPort)
 	fmt.Fprintf(os.Stderr, "Press Ctrl+C to stop.\n")
 
-	// 尽早打开日志文件，确保后续所有启动步骤（包括崩溃）都记录到文件
-	err = serverState.InitLogFile()
-	if err != nil {
-		log.Fatalf("Failed to initialize log file: %v", err)
-	}
-
 	// 启动所有核心服务
-	if err := serverState.StartLogServer(); err != nil {
-		log.Fatalf("Failed to start log server: %v", err)
+	if err := serverState.StartCoreServices(); err != nil {
+		log.Fatalf("Failed to start core services: %v", err)
 	}
-	serverState.StartFTPServer()
-	serverState.StartHTTPAndWSServers()
 	go serverState.PerformTimedScan()
 
 	// 自动打开浏览器
@@ -86,9 +78,7 @@ func main() {
 	log.Println("Shutting down Probe Tool Desktop Application...")
 
 	// 优雅关闭序列
-	serverState.StopLogServer()
-	serverState.StopFTPServer()
-	serverState.StopHTTPAndWSServers()
+	serverState.StopCoreServices()
 
 	log.Println("Application exited gracefully.")
 }

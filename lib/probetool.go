@@ -464,6 +464,8 @@ type ServerState struct {
 
 	// Atomic flags for thread-safe status queries
 	logRunning atomic.Bool
+	running    atomic.Bool
+	lastError  atomic.Value
 
 	// Log file handle, opened by InitLogFile() before services start
 	logFile *os.File
@@ -478,6 +480,89 @@ type ServerState struct {
 	// HTTP/WS Server instances for graceful shutdown
 	httpServer *http.Server
 	wsServer   *http.Server
+}
+
+func (s *ServerState) setLastError(err error) {
+	if err == nil {
+		s.lastError.Store("")
+		return
+	}
+	s.lastError.Store(err.Error())
+}
+
+// IsRunning reports whether all core backend services started successfully.
+func (s *ServerState) IsRunning() bool {
+	return s != nil && s.running.Load()
+}
+
+// LastError returns the most recent startup/shutdown error for mobile bindings.
+func (s *ServerState) LastError() string {
+	if s == nil {
+		return ""
+	}
+	if value := s.lastError.Load(); value != nil {
+		if message, ok := value.(string); ok {
+			return message
+		}
+	}
+	return ""
+}
+
+// CloseLogFile restores stderr logging and closes the current log file.
+func (s *ServerState) CloseLogFile() {
+	log.SetOutput(os.Stderr)
+	if s.logFile != nil {
+		if err := s.logFile.Close(); err != nil {
+			log.Printf("Log file close error: %v", err)
+		}
+		s.logFile = nil
+	}
+}
+
+// StartCoreServices starts all backend services and rolls back partial startup on failure.
+func (s *ServerState) StartCoreServices() error {
+	if s.IsRunning() {
+		return nil
+	}
+
+	if err := s.InitLogFile(); err != nil {
+		s.setLastError(err)
+		return err
+	}
+	if err := s.StartLogServer(); err != nil {
+		s.CloseLogFile()
+		s.setLastError(err)
+		return err
+	}
+	if err := s.StartFTPServer(); err != nil {
+		_ = s.StopLogServer()
+		s.setLastError(err)
+		return err
+	}
+	if err := s.StartHTTPAndWSServers(); err != nil {
+		s.StopFTPServer()
+		_ = s.StopLogServer()
+		s.setLastError(err)
+		return err
+	}
+
+	s.running.Store(true)
+	s.setLastError(nil)
+	return nil
+}
+
+// StopCoreServices stops all backend services and clears the running state.
+func (s *ServerState) StopCoreServices() {
+	s.running.Store(false)
+	s.StopHTTPAndWSServers()
+	s.StopFTPServer()
+	if s.LogServerStopChan != nil {
+		if err := s.StopLogServer(); err != nil {
+			log.Printf("Log server stop error: %v", err)
+		}
+	} else {
+		s.CloseLogFile()
+	}
 }
 
 // NewServerState creates a new instance of ServerState.
@@ -519,7 +604,7 @@ func (s *ServerState) InitLogFile() error {
 }
 
 // StartHTTPAndWSServers starts the HTTP and WebSocket servers.
-func (s *ServerState) StartHTTPAndWSServers() {
+func (s *ServerState) StartHTTPAndWSServers() error {
 	// HTTP Server
 	httpMux := http.NewServeMux()
 	httpMux.Handle("/", http.FileServer(http.Dir(s.StaticDir))) // Serve static files from provided path
@@ -537,13 +622,10 @@ func (s *ServerState) StartHTTPAndWSServers() {
 		Handler: httpMux,
 	}
 
-	go func() {
-		log.Printf("HTTP Server starting on :%d, Static Dir: %s", HTTPPort, s.StaticDir)
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("HTTP Server failed to start: %v", err) // Use Printf instead of Fatal
-		}
-		log.Println("HTTP Server stopped.")
-	}()
+	httpListener, err := net.Listen("tcp", s.httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("HTTP server bind failed on %s: %w", s.httpServer.Addr, err)
+	}
 
 	// WebSocket Server
 	wsMux := http.NewServeMux()
@@ -554,16 +636,30 @@ func (s *ServerState) StartHTTPAndWSServers() {
 		Handler: wsMux,
 	}
 
+	wsListener, err := net.Listen("tcp", s.wsServer.Addr)
+	if err != nil {
+		_ = httpListener.Close()
+		s.httpServer = nil
+		return fmt.Errorf("WS server bind failed on %s: %w", s.wsServer.Addr, err)
+	}
+
+	go func() {
+		log.Printf("HTTP Server starting on :%d, Static Dir: %s", HTTPPort, s.StaticDir)
+		if err := s.httpServer.Serve(httpListener); err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP Server failed to start: %v", err) // Use Printf instead of Fatal
+		}
+		log.Println("HTTP Server stopped.")
+	}()
+
 	go func() {
 		log.Printf("WS Server starting on :%d", WSPort)
-		if err := s.wsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.wsServer.Serve(wsListener); err != nil && err != http.ErrServerClosed {
 			log.Printf("WS Server failed to start: %v", err) // Use Printf instead of Fatal
 		}
 		log.Println("WS Server stopped.")
 	}()
 
-	// Give servers a moment to start
-	time.Sleep(100 * time.Millisecond)
+	return nil
 }
 
 // StopHTTPAndWSServers stops the HTTP and WebSocket servers gracefully.
@@ -601,17 +697,16 @@ func (s *ServerState) StartLogServer() error {
 		file = s.logFile
 	}
 
+	addr := net.UDPAddr{Port: LogToolPort, IP: net.ParseIP("0.0.0.0")}
+	conn, err := net.ListenUDP("udp", &addr)
+	if err != nil {
+		return fmt.Errorf("log server bind failed on :%d: %w", LogToolPort, err)
+	}
+
 	stopChan := make(chan struct{})
 	s.LogServerStopChan = stopChan
 	s.logRunning.Store(true)
-
 	s.LogServerWg.Go(func() {
-		addr := net.UDPAddr{Port: LogToolPort, IP: net.ParseIP("0.0.0.0")}
-		conn, err := net.ListenUDP("udp", &addr)
-		if err != nil {
-			log.Printf("Log server bind error: %v", err)
-			return
-		}
 		defer conn.Close()
 		buf := make([]byte, 4096)
 		for {
@@ -651,11 +746,7 @@ func (s *ServerState) StopLogServer() error {
 	s.LogServerStopChan = nil
 	s.logRunning.Store(false)
 	// Restore stderr and close the log file
-	log.SetOutput(os.Stderr)
-	if s.logFile != nil {
-		s.logFile.Close()
-		s.logFile = nil
-	}
+	s.CloseLogFile()
 	return nil
 }
 
@@ -781,7 +872,7 @@ func sanitizeDeviceID(id string) string {
 	for _, r := range id {
 		// Only allow alphanumeric characters, spaces, hyphens, underscores
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
-		   r == ' ' || r == '-' || r == '_' || r == '.' {
+			r == ' ' || r == '-' || r == '_' || r == '.' {
 			sanitized.WriteRune(r)
 		} else {
 			// Replace other characters with underscore
@@ -790,7 +881,6 @@ func sanitizeDeviceID(id string) string {
 	}
 	return sanitized.String()
 }
-
 
 // PerformTimedScan performs a single 5-second scan.
 func (s *ServerState) PerformTimedScan() {
@@ -1018,28 +1108,37 @@ type FTPClientDriver struct {
 func (d *FTPClientDriver) GetSettings() (*ftpserver.Settings, error) { return nil, nil }
 
 // StartFTPServer starts the FTP server.
-func (s *ServerState) StartFTPServer() {
+func (s *ServerState) StartFTPServer() error {
 	if _, err := os.Stat(s.FTPRootDir); os.IsNotExist(err) {
-		os.Mkdir(s.FTPRootDir, 0755)
+		if err := os.Mkdir(s.FTPRootDir, 0755); err != nil {
+			return fmt.Errorf("failed to create FTP root %s: %w", s.FTPRootDir, err)
+		}
 	}
 
 	driver := &FTPDriver{BaseDir: s.FTPRootDir}
 	server := ftpserver.NewFtpServer(driver)
+	if err := server.Listen(); err != nil {
+		return fmt.Errorf("FTP server bind failed on :%d: %w", FTPPort, err)
+	}
 
 	go func() {
 		log.Printf("FTP Server starting on :%d, Root: %s", FTPPort, s.FTPRootDir)
-		if err := server.ListenAndServe(); err != nil {
+		if err := server.Serve(); err != nil {
 			log.Printf("FTP Server error: %v", err)
 		}
 	}()
 	s.FTPServer = server
+	return nil
 }
 
 // StopFTPServer stops the FTP server.
 func (s *ServerState) StopFTPServer() {
 	if s.FTPServer != nil {
-		s.FTPServer.Stop()
+		if err := s.FTPServer.Stop(); err != nil {
+			log.Printf("FTP Server stop error: %v", err)
+		}
 		log.Println("FTP Server stopped.")
+		s.FTPServer = nil
 	}
 }
 
