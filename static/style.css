@@ -10,22 +10,20 @@ body {
     margin: 0; 
     background-color: #f4f4f4;
     color: #333;
-    /* 使用 dvh 适配动态地址栏，回退使用 vh */
-    height: 100vh;
-    height: 100dvh;
-    overflow: hidden; /* 防止整个页面产生滚动条 */
-    display: flex;
-    flex-direction: column;
+    overflow: hidden;
 }
 
 /* === 主容器 === */
 .main-layout-wrapper {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     display: flex;
     flex-direction: column; 
-    width: 100%; 
-    height: 100%; 
     background-color: #fff;
-    overflow: hidden; /* 确保主容器内的滚动由子元素控制 */
+    overflow: hidden;
 }
 
 /* === 顶部 Header === */
@@ -367,10 +365,7 @@ button:focus, input:focus, select:focus {
     /* 1. 改变布局方向 */
     .content-area {
         flex-direction: column;
-        /* 关键：给底部留出空间，防止内容被 fixed 的 footer 遮挡 */
-        /* 使用 env() 函数更好地适配不同设备 */
         padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
-        height: 100%;
     }
 
     .button-group {

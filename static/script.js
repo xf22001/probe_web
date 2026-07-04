@@ -4,14 +4,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // 显示加载指示器
     function showLoading(element) {
         if (element) {
-            element.style.display = 'inline-block';
+            element.style.visibility = 'visible';
         }
     }
 
-    // 隐藏加载指示器
+    // 隐藏加载指示器（保留占位空间，防止布局跳动）
     function hideLoading(element) {
         if (element) {
-            element.style.display = 'none';
+            element.style.visibility = 'hidden';
         }
     }
 
