@@ -434,6 +434,13 @@ func (dc *DeviceConnection) Send(fn uint32, stage uint32, data []byte) error {
 	return nil
 }
 
+func isClosedUDPConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "use of closed network connection")
+}
+
 // ==========================================
 // 5. Server State & Core Logic
 // ==========================================
@@ -969,6 +976,14 @@ func (s *ServerState) ConnectToDevice(ip string) (string, error) {
 					if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
 						continue
 					}
+					select {
+					case <-stopChan:
+						return
+					default:
+					}
+					if isClosedUDPConnectionError(err) {
+						return
+					}
 					log.Printf("Error reading from device %s: %v", ip, err)
 					continue
 				}
@@ -1281,7 +1296,7 @@ func (s *ServerState) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	if err := dc.Send(uint32(b.Fn), uint32(b.Stage), raw); err != nil {
 		log.Printf("Error sending message to %s: %v", b.IP, err)
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusServiceUnavailable)
 		sendJSON(w, map[string]string{"status": "error", "reason": fmt.Sprintf("failed to send message: %v", err)})
 		return
 	}

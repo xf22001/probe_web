@@ -37,9 +37,10 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoadingState(loadingIndicator, true);
         try {
             const response = await fetch(url, options);
-            const data = await response.json();
+            const contentType = response.headers.get('content-type') || '';
+            const data = contentType.includes('application/json') ? await response.json() : {};
             if (!response.ok) {
-                throw new Error(data.message || 'Request failed');
+                throw new Error(data.reason || data.message || `Request failed (${response.status})`);
             }
             return data;
         } catch (error) {
