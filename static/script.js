@@ -229,7 +229,7 @@ document.addEventListener('DOMContentLoaded', () => {
     connectLogWebSocket();
 
     // === 历史记录管理逻辑 ===
-    const MAX_HISTORY_ITEMS = 10;
+    const MAX_HISTORY_ITEMS = 100;
     const HISTORY_STORAGE_KEY = 'probe_tool_cmd_history';
     let commandHistory = [];
 
