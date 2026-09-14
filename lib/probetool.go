@@ -224,20 +224,28 @@ type PartialMessage struct {
 	mu             sync.Mutex // Mutex to protect access to this partial message
 }
 
-// Reassembler manages reassembly buffer for a single logical message stream (per connection).
+// Reassembler manages reassembly buffers for the logical message streams of one
+// connection. Messages are kept in a map keyed by (fn, stage) so that two
+// different commands in flight at the same time do not evict each other.
 type Reassembler struct {
-	currentMessage  *PartialMessage // The current message being reassembled
-	mu              sync.RWMutex    // RWMutex to allow concurrent read access when no modification occurs
-	timeout         time.Duration   // Timeout for incomplete messages
-	cleanupTicker   *time.Ticker    // For periodic cleanup
-	stopCleanupChan chan struct{}   // To stop cleanup goroutine
+	messages        map[msgKey]*PartialMessage // In-flight messages, keyed by (fn, stage)
+	mu              sync.RWMutex               // RWMutex to allow concurrent read access when no modification occurs
+	timeout         time.Duration              // Timeout for incomplete messages
+	cleanupTicker   *time.Ticker               // For periodic cleanup
+	stopCleanupChan chan struct{}              // To stop cleanup goroutine
+}
+
+// msgKey identifies a logical message stream sending to a device.
+type msgKey struct {
+	fn    uint32
+	stage uint32
 }
 
 // NewReassembler creates and returns a new Reassembler instance.
 // It also starts a background cleanup routine.
 func NewReassembler(timeout time.Duration) *Reassembler {
 	r := &Reassembler{
-		currentMessage:  nil, // Initially no message is being reassembler
+		messages:        make(map[msgKey]*PartialMessage),
 		timeout:         timeout,
 		cleanupTicker:   time.NewTicker(timeout / 2), // Check periodically, half the timeout duration
 		stopCleanupChan: make(chan struct{}),
@@ -252,23 +260,19 @@ func (r *Reassembler) cleanupRoutine() {
 	for {
 		select {
 		case <-r.cleanupTicker.C:
-			r.mu.RLock() // Use read lock initially to check if there's a message
-			currentMsg := r.currentMessage
-			r.mu.RUnlock()
-
-			if currentMsg != nil {
-				r.mu.Lock() // Lock reassembler first (consistent with Clear())
-				if r.currentMessage == currentMsg {
-					currentMsg.mu.Lock() // Then lock the message
-					if time.Since(currentMsg.LastUpdateTime) > r.timeout {
-						log.Printf("Reassembler: Cleaning up timed out partial message (fn: %d, stage: %d, totalSize: %d)",
-							currentMsg.Fn, currentMsg.Stage, currentMsg.TotalSize)
-						r.currentMessage = nil // Clear the timed-out message
-					}
-					currentMsg.mu.Unlock() // Unlock message
+			now := time.Now()
+			r.mu.Lock()
+			for key, msg := range r.messages {
+				msg.mu.Lock()
+				timedOut := now.Sub(msg.LastUpdateTime) > r.timeout
+				if timedOut {
+					log.Printf("Reassembler: Cleaning up timed out partial message (fn: %d, stage: %d, totalSize: %d)",
+						msg.Fn, msg.Stage, msg.TotalSize)
+					delete(r.messages, key)
 				}
-				r.mu.Unlock() // Unlock reassembler
+				msg.mu.Unlock()
 			}
+			r.mu.Unlock()
 		case <-r.stopCleanupChan:
 			return
 		}
@@ -280,18 +284,18 @@ func (r *Reassembler) StopCleanup() {
 	close(r.stopCleanupChan)
 }
 
-// Clear clears any currently reassembling message state.
+// Clear clears all currently reassembling message state.
 // Used when a connection is disconnected.
 func (r *Reassembler) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.currentMessage != nil {
-		msg := r.currentMessage
-		msg.mu.Lock() // Lock to safely clear
-		r.currentMessage = nil
-		msg.mu.Unlock()
-		log.Println("Reassembler: Cleared current message state.")
+	if len(r.messages) == 0 {
+		return
 	}
+	for key := range r.messages {
+		delete(r.messages, key)
+	}
+	log.Println("Reassembler: Cleared all partial message state.")
 }
 
 // Helper functions for bitmask operations
@@ -313,20 +317,22 @@ func setBit(mask []byte, index uint32) {
 	mask[byteIndex] |= (1 << bitIndex)
 }
 
-// AddFragment adds a received fragment to the reassembly buffer.
-// It returns the fully reassembled message if complete, otherwise nil.
-// It also returns an error if something goes wrong (e.g., mismatched totalSize for an existing message).
+// AddFragment adds a received fragment to the reassembly buffer of the message
+// stream identified by (fn, stage). It returns the fully reassembled message if
+// complete, otherwise nil.
 // The 'ip' parameter is mainly for logging context.
 func (r *Reassembler) AddFragment(ip string, fn, stage, totalSize, dataSize, dataOffset uint32, fragmentData []byte) ([]byte, error) {
+	// An empty message is considered immediately complete.
+	if totalSize == 0 && dataSize == 0 {
+		return []byte{}, nil
+	}
+
+	key := msgKey{fn: fn, stage: stage}
+
 	r.mu.Lock() // Lock Reassembler instance
-	pm := r.currentMessage
+	pm := r.messages[key]
 	if pm == nil {
-		// This is the first fragment for a new message sequence.
-		if totalSize == 0 && dataSize == 0 { // Empty message is considered immediately complete
-			r.mu.Unlock()
-			return []byte{}, nil
-		}
-		// Calculate the number of bytes needed for the bitmask
+		// First fragment seen for this (fn, stage) stream.
 		maskSize := (totalSize + 7) / 8 // Round up to nearest byte
 		pm = &PartialMessage{
 			Fn:             fn,
@@ -336,7 +342,7 @@ func (r *Reassembler) AddFragment(ip string, fn, stage, totalSize, dataSize, dat
 			ReceivedMask:   make([]byte, maskSize),
 			LastUpdateTime: time.Now(),
 		}
-		r.currentMessage = pm // Set as the current message being reassembled
+		r.messages[key] = pm
 	}
 	r.mu.Unlock() // Release Reassembler lock early
 
@@ -346,21 +352,16 @@ func (r *Reassembler) AddFragment(ip string, fn, stage, totalSize, dataSize, dat
 	// Update timestamp for activity
 	pm.LastUpdateTime = time.Now()
 
-	// Consistency checks: If fn/stage/totalSize differ for an existing incomplete message,
-	// it's likely a new message has started before the old one completed.
-	// In a UDP context without a unique message ID per logical message, this is a reasonable heuristic.
-	if (pm.Fn != fn || pm.Stage != stage || pm.TotalSize != totalSize) && pm.TotalSize != 0 {
-		log.Printf("Reassembler for %s: Clearing old partial message due to new sequence. Old: fn=%d,stage=%d,total=%d. New: fn=%d,stage=%d,total=%d",
-			ip, pm.Fn, pm.Stage, pm.TotalSize, fn, stage, totalSize)
-		// Clear the old message and initialize for the new one
+	// For a logical message the totalSize is constant across all of its fragments.
+	// A totalSize that disagrees with the in-flight message means this "same" (fn, stage)
+	// stream was restarted (e.g. a retried command), so reset the buffer for the new one.
+	if pm.TotalSize != totalSize {
+		log.Printf("Reassembler for %s: Restarting message stream (fn=%d, stage=%d) due to totalSize change. Old: %d, New: %d",
+			ip, fn, stage, pm.TotalSize, totalSize)
 		maskSize := (totalSize + 7) / 8 // Round up to nearest byte
-		pm.Fn = fn
-		pm.Stage = stage
 		pm.TotalSize = totalSize
 		pm.ReceivedData = make([]byte, totalSize)
 		pm.ReceivedMask = make([]byte, maskSize)
-	} else if pm.TotalSize != totalSize {
-		return nil, fmt.Errorf("reassembler for %s: total size mismatch. Existing: %d, New fragment: %d", ip, pm.TotalSize, totalSize)
 	}
 
 	// Validate fragment bounds before copying
@@ -392,14 +393,18 @@ func (r *Reassembler) AddFragment(ip string, fn, stage, totalSize, dataSize, dat
 		copy(fullMessage, pm.ReceivedData) // Create a copy to return
 
 		r.mu.Lock()
-		r.currentMessage = nil // Remove the completed message from buffers
+		// Only remove if this is still the in-flight message for the key
+		// (a concurrent restart may have replaced it).
+		if r.messages[key] == pm {
+			delete(r.messages, key)
+		}
 		r.mu.Unlock()
 
 		log.Printf("Reassembler for %s: Message reassembled successfully (fn: %d, stage: %d, totalSize: %d)", ip, fn, stage, totalSize)
 		return fullMessage, nil
 	}
 
-	return nil, nil // Not complete yet, or error in logic
+	return nil, nil // Not complete yet
 }
 
 // ==========================================
@@ -480,6 +485,16 @@ type ServerState struct {
 	// Timed Scan Logic
 	ActiveScanResults map[string]bool
 	ActiveScanLock    sync.Mutex
+	// scanMu serializes PerformTimedScan so concurrent refresh requests cannot
+	// spawn overlapping listeners that fight over the broadcast port.
+	scanMu sync.Mutex
+
+	// Device snapshot coalescing: ScheduleDevicesPush collapses bursts of
+	// device updates into at most one PushDevicesSnapshot per interval,
+	// instead of one goroutine per received broadcast packet.
+	devicesPushSignal chan struct{} // buffered(1); a pending "push needed" token
+	devicesPushStop   chan struct{} // closed to stop the pusher goroutine
+	devicesPushWg     sync.WaitGroup
 
 	// FTP Server Instance
 	FTPServer *ftpserver.FtpServer
@@ -553,6 +568,7 @@ func (s *ServerState) StartCoreServices() error {
 		return err
 	}
 
+	s.StartDevicesPusher()
 	s.running.Store(true)
 	s.setLastError(nil)
 	return nil
@@ -561,6 +577,7 @@ func (s *ServerState) StartCoreServices() error {
 // StopCoreServices stops all backend services and clears the running state.
 func (s *ServerState) StopCoreServices() {
 	s.running.Store(false)
+	s.StopDevicesPusher()
 	s.StopHTTPAndWSServers()
 	s.StopFTPServer()
 	if s.LogServerStopChan != nil {
@@ -735,8 +752,11 @@ func (s *ServerState) StartLogServer() error {
 				timeStr := time.Now().Format("2006-01-02 15:04:05.000")
 				// rAddr 已经是 *net.UDPAddr 类型，可以直接访问 IP 字段
 				formatted := fmt.Sprintf("[%s] [%s] %s", timeStr, rAddr.IP.String(), strings.TrimSpace(msg))
-				s.BroadcastLog(formatted)          // Use s.BroadcastLog for WebSocket clients
-				file.WriteString(formatted + "\n") // Write to file
+				s.BroadcastLog(formatted) // Use s.BroadcastLog for WebSocket clients
+				if _, err := file.WriteString(formatted + "\n"); err != nil {
+					// Disk full / handle closed: surface it instead of silently dropping logs.
+					log.Printf("Log server: failed to write to log file: %v", err)
+				}
 			}
 		}
 	})
@@ -757,6 +777,24 @@ func (s *ServerState) StopLogServer() error {
 	return nil
 }
 
+// wsWriteTimeout bounds how long a single WebSocket write may take. A client
+// that stops reading (sleeping tab, dropped link without FIN) would otherwise
+// block the broadcast loop and every other client behind it.
+const wsWriteTimeout = 5 * time.Second
+
+// writeToClients sends payload to every client in the set, dropping any client
+// whose write fails or times out. The caller must hold the lock protecting set.
+func writeToClients(set map[*websocket.Conn]bool, payload []byte, label string) {
+	for ws := range set {
+		_ = ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+		if err := ws.WriteMessage(websocket.TextMessage, payload); err != nil {
+			log.Printf("Error writing to %s WebSocket (%s), dropping client: %v", label, ws.RemoteAddr(), err)
+			ws.Close()
+			delete(set, ws)
+		}
+	}
+}
+
 // PushDevicesSnapshot sends the current device list to WebSocket clients.
 func (s *ServerState) PushDevicesSnapshot() {
 	s.DevicesLock.RLock()
@@ -766,29 +804,78 @@ func (s *ServerState) PushDevicesSnapshot() {
 	}
 	s.DevicesLock.RUnlock()
 
-	payload, _ := json.Marshal(map[string]any{"type": "devices", "data": list})
-	s.DeviceLock.Lock()
-	for ws := range s.DeviceClients {
-		if err := ws.WriteMessage(websocket.TextMessage, payload); err != nil {
-			log.Printf("Error writing to device WebSocket: %v", err)
-			ws.Close()
-			delete(s.DeviceClients, ws)
-		}
+	payload, err := json.Marshal(map[string]any{"type": "devices", "data": list})
+	if err != nil {
+		log.Printf("PushDevicesSnapshot: marshal failed: %v", err)
+		return
 	}
+	s.DeviceLock.Lock()
+	writeToClients(s.DeviceClients, payload, "device")
 	s.DeviceLock.Unlock()
+}
+
+// devicesPushInterval is the minimum spacing between coalesced device pushes.
+const devicesPushInterval = 200 * time.Millisecond
+
+// StartDevicesPusher launches the goroutine that coalesces device updates.
+// Called from StartCoreServices; safe to call once per ServerState lifetime.
+func (s *ServerState) StartDevicesPusher() {
+	s.devicesPushSignal = make(chan struct{}, 1)
+	s.devicesPushStop = make(chan struct{})
+	s.devicesPushWg.Go(func() {
+		// Coalesce: on the first signal, wait out the interval so any further
+		// signals that arrive during it fold into the same push.
+		for {
+			select {
+			case <-s.devicesPushStop:
+				return
+			case <-s.devicesPushSignal:
+			}
+			select {
+			case <-s.devicesPushStop:
+				return
+			case <-time.After(devicesPushInterval):
+			}
+			// Drain any token that arrived while we waited (the burst's last one).
+			select {
+			case <-s.devicesPushSignal:
+			default:
+			}
+			s.PushDevicesSnapshot()
+		}
+	})
+}
+
+// StopDevicesPusher stops the coalescing goroutine, if running.
+func (s *ServerState) StopDevicesPusher() {
+	if s.devicesPushStop != nil {
+		close(s.devicesPushStop)
+		s.devicesPushWg.Wait()
+		s.devicesPushStop = nil
+	}
+}
+
+// ScheduleDevicesPush requests a device snapshot push, coalescing bursts.
+// It never blocks and never spawns unbounded goroutines.
+func (s *ServerState) ScheduleDevicesPush() {
+	if s.devicesPushSignal == nil {
+		return
+	}
+	select {
+	case s.devicesPushSignal <- struct{}{}:
+	default: // a push is already pending; it will cover this update too
+	}
 }
 
 // BroadcastLog sends a log line to WebSocket clients.
 func (s *ServerState) BroadcastLog(line string) {
-	payload, _ := json.Marshal(map[string]string{"type": "log", "data": line})
-	s.LogLock.Lock()
-	for ws := range s.LogClients {
-		if err := ws.WriteMessage(websocket.TextMessage, payload); err != nil {
-			log.Printf("Error writing to log WebSocket: %v", err)
-			ws.Close()
-			delete(s.LogClients, ws)
-		}
+	payload, err := json.Marshal(map[string]string{"type": "log", "data": line})
+	if err != nil {
+		log.Printf("BroadcastLog: marshal failed: %v", err)
+		return
 	}
+	s.LogLock.Lock()
+	writeToClients(s.LogClients, payload, "log")
 	s.LogLock.Unlock()
 }
 
@@ -809,12 +896,11 @@ func (s *ServerState) UpdateDevice(ip, id string) {
 	if dev, exists := s.Devices[ip]; !exists {
 		s.Devices[ip] = &Device{IP: ip, ID: displayID, Status: "Available"}
 		log.Printf("New Device: %s (%s)", ip, displayID)
-	} else {
-		if strings.HasPrefix(dev.ID, "Unnamed_Device_") && id != "" && dev.ID != displayID {
-			dev.ID = displayID
-		} else if dev.ID != displayID && id != "" {
-			dev.ID = displayID
-		}
+	} else if id != "" && dev.ID != displayID {
+		// The device reported a real ID that differs from what we have stored:
+		// either replacing a placeholder name, or the device's ID changed.
+		log.Printf("Device %s ID updated: %s -> %s", ip, dev.ID, displayID)
+		dev.ID = displayID
 	}
 }
 
@@ -868,7 +954,7 @@ func (s *ServerState) RunUdpListener(stopChan chan struct{}) {
 			id = sanitizeDeviceID(id)
 
 			s.UpdateDevice(ip, id)
-			go s.PushDevicesSnapshot() // Push updates to clients
+			s.ScheduleDevicesPush() // Coalesced push to clients
 		}
 	}
 }
@@ -890,7 +976,18 @@ func sanitizeDeviceID(id string) string {
 }
 
 // PerformTimedScan performs a single 5-second scan.
+// It is serialized via scanMu: a refresh requested while a scan is already in
+// progress is ignored rather than starting a second listener on the same port.
 func (s *ServerState) PerformTimedScan() {
+	if !s.scanMu.TryLock() {
+		log.Println("Timed scan already in progress, skipping duplicate request.")
+		return
+	}
+	// Held for the whole scan so concurrent callers bail out above.
+	// The listener goroutine below is fully joined before we return, so releasing
+	// the lock here is safe (no listener outlives this function).
+	defer s.scanMu.Unlock()
+
 	log.Println("Starting 5s timed scan...")
 
 	s.ActiveScanLock.Lock()
@@ -898,11 +995,16 @@ func (s *ServerState) PerformTimedScan() {
 	s.ActiveScanLock.Unlock()
 
 	stopChan := make(chan struct{})
-	go s.RunUdpListener(stopChan)
+	listenerDone := make(chan struct{})
+	go func() {
+		defer close(listenerDone)
+		s.RunUdpListener(stopChan)
+	}()
 
 	time.Sleep(5 * time.Second)
 
 	close(stopChan)
+	<-listenerDone // Wait for the listener to release the broadcast port before returning.
 
 	s.DevicesLock.Lock()
 	s.ActiveScanLock.Lock()
@@ -1036,7 +1138,7 @@ func (s *ServerState) ConnectToDevice(ip string) (string, error) {
 	s.Devices[ip].Status = "Connected"
 	s.Devices[ip].ConnectedVia = localIP
 	s.DevicesLock.Unlock()
-	go s.PushDevicesSnapshot()
+	s.PushDevicesSnapshot()
 	return localIP, nil
 }
 
@@ -1068,7 +1170,7 @@ func (s *ServerState) DisconnectFromDevice(ip string) {
 		dev.ConnectedVia = ""
 	}
 	s.DevicesLock.Unlock()
-	go s.PushDevicesSnapshot()
+	s.PushDevicesSnapshot()
 }
 
 // ==========================================
@@ -1444,7 +1546,9 @@ func (s *ServerState) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.DeviceLock.Lock()
 		s.DeviceClients[ws] = true
 		s.DeviceLock.Unlock()
-		go s.PushDevicesSnapshot()
+		// Send the current snapshot immediately so the freshly connected UI
+		// does not wait for the next coalesced push.
+		s.PushDevicesSnapshot()
 		defer func() {
 			s.DeviceLock.Lock()
 			delete(s.DeviceClients, ws)
@@ -1457,6 +1561,10 @@ func (s *ServerState) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Keep the connection open and detect client-side close.
+	// Incoming data messages are intentionally ignored (the protocol is
+	// push-only after registration), but the socket must be drained so a
+	// disconnect is noticed and the defer above runs.
 	for {
 		if _, _, err := ws.ReadMessage(); err != nil {
 			break
