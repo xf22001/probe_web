@@ -112,7 +112,25 @@ fi
 
 # 构建JSON负载
 # 服务器将接收到明确的 fn, stage, 和 text (完整指令字符串)
-JSON_DATA=$(printf '{"commands": [{"ip":"%s","text":"%s","fn":%d,"stage":%d}]}' "$DEVICE_IP" "$TEXT_DATA" "$FN_FROM_DATA" "$STAGE")
+# 优先用 jq 生成以保证 text 中的引号/反斜杠被正确转义;
+# 无 jq 时回退到手工拼接, 并显式拒绝会破坏 JSON 的字符.
+if command -v jq >/dev/null 2>&1; then
+    JSON_DATA=$(jq -n \
+        --arg ip "$DEVICE_IP" \
+        --arg text "$TEXT_DATA" \
+        --argjson fn "$FN_FROM_DATA" \
+        --argjson stage "$STAGE" \
+        '{commands: [{ip: $ip, text: $text, fn: $fn, stage: $stage}]}')
+else
+    case "$TEXT_DATA" in
+        *'"'*|*'\'*)
+            echo "错误: 未找到 jq, 且指令字符串含有 '\"' 或 '\\', 无法安全地拼接 JSON." >&2
+            echo "请安装 jq 或移除这些字符后重试." >&2
+            exit 1
+            ;;
+    esac
+    JSON_DATA=$(printf '{"commands": [{"ip":"%s","text":"%s","fn":%d,"stage":%d}]}' "$DEVICE_IP" "$TEXT_DATA" "$FN_FROM_DATA" "$STAGE")
+fi
 
 # 发送请求
 echo "正在发送指令..."
